@@ -7,6 +7,7 @@ use File::stat;
 use File::Copy;
 use DateTime;
 use Astro::Sunrise;
+# the WWW::Curl is still used, but adds no value at the moment, will be phased out in favor of CLI curl (for consistency)
 use WWW::Curl;
 use WWW::Curl::Easy;
 
@@ -116,14 +117,14 @@ sub in($$) {
 	return 0;
 }	
 
-# convert HH:MM to seconds; :SS is ignored
+# convert HH:MM to seconds; :SS is ignored, which means it's rounded to the minute
 sub secs($) {
 	my $hhmm = shift;
 	my ($hh,$mm,$ss) = split (":", $hhmm);
 	return ($hh * 60 * 60 ) + ($mm * 60);
 }	
 
-# min max
+# minmax, prevent a value for exceeding the given minimum or maximum
 sub minmax($$$) {
 	my $val_ref = shift;
 	my $min = shift;
@@ -149,7 +150,7 @@ sub run_schedule_check() {
 		my $ss = secs($config{'schedule'}{$schedule}{'start_time'});
 		my $se = secs($config{'schedule'}{$schedule}{'end_time'});
 		my $sn = secs("$now_hour:$now_minute"); 
-		my @days = split (" ", $config{'schedule'}{$schedule}{'days'});
+		my @days = split (/\s+/, $config{'schedule'}{$schedule}{'days'});
 		# if the end time is beyond midnight, add a day in seconds
 		# plus: if the now is smaller than the start, add a day to current if past midnight
 		# this works, because blindly adding a day to now will put it out of range if sone unjustly 
@@ -161,8 +162,8 @@ sub run_schedule_check() {
 
 		# match today with schedule
 		if (in($now_dow,\@days)) {
-			my @on_lights  = split(/ /,$config{'schedule'}{$schedule}{'lights_on'});
-			my @off_lights = split(/ /,$config{'schedule'}{$schedule}{'lights_off'});
+			my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights_on'});
+			my @off_lights = split(/\s+/,$config{'schedule'}{$schedule}{'lights_off'});
 
 
 			# first determine some stuff
@@ -200,12 +201,13 @@ sub run_schedule_check() {
 					$bri_adjust += adjust_for_weather();
 				}	
 
-				# cycle throught the lights and make adjustements
+				# cycle throught the lights and make adjustements, only on lights that should be adjusted (which equals the ones that were
+				# requested to be on on the start of this period)
 				foreach my $light (@on_lights) {
 					# first check if there is a previous situation known
 					# then check if the current situation is different from previous
 					# if so, the lamps were altered, whatever was changed, should be left alone.
-					# the difficulty is to separate this daemon's alterations from others.
+					# the difficulty will be to separate this daemon's alterations from others.
 					
 					# get current values
 					my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
@@ -239,7 +241,6 @@ sub run_schedule_check() {
 						$new_sat = $def_sat + $sat_adjust;
 						$lights{'previous'}{$light}{'saturation'} = $def_sat;
 					}	
-
 						
 					if ($def_hue == $pre_hue) {
 						$new_hue = $def_hue + $hue_adjust;
@@ -259,8 +260,8 @@ sub run_schedule_check() {
 	}	
 }
 
-# RC 1 = ok
-# RC 0 = not, data probabaly incomplete
+# RC 1 = ok + current values
+# RC 0 = not, data probably incomplete
 sub light_current($) {
 	my $light      = shift;
 	my $brightness = -1;
@@ -292,6 +293,8 @@ sub light_adjust($$$$$) {
 
 	# setup a conversation to the bridge
 	my ($curl_returncode, $curl_output) = curl_hue("/lights/$light/state","PUT",$curl_data);
+	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
+	# to get a match on success. TODO
 	if ($curl_returncode == 0 and $curl_output =~ /success/) {
 		printt("  a+ light $light adjusted\n");
 		return 1;
@@ -313,6 +316,7 @@ sub curl_hue($$;$) {
 	my $curl_RC      = 1;
 	my $curl_command; 
 	
+	# a PUT of POST needs data with a -d option
 	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
 	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
 	# printt ("curl    : $curl_command\n");
@@ -437,8 +441,8 @@ sub mail_info($$) {
         my $title = shift;
         my $message = shift;
         open (PH, "|/usr/sbin/sendmail -t");
-	print (PH "To: hue\@oxoob.com\n");
-	print (PH "From: hue\@oxoob.com\n");
+	print (PH "To: $config{'config'}{'hue'}{'email'}\n");
+	print (PH "From: hue\n");
 	print (PH "Subject: $title\n\n");
 	print (PH "$message\n\n");
 	close(PH);
@@ -521,6 +525,9 @@ sub printt($) {
 #--------------------------
 # main
 #--------------------------
+
+# unbuffered output
+$| = 1
 
 # set_STDERR("hued.log");
 # daemonize this MF! (from the Perl Cookbook)
