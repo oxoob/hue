@@ -1,0 +1,608 @@
+#!/usr/bin/perl -w 
+
+# use clauses
+use strict;
+use POSIX;
+use File::stat;
+use File::Copy;
+use DateTime;
+use Astro::Sunrise;
+use WWW::Curl;
+use WWW::Curl::Easy;
+
+my $curl = "/usr/bin/curl"; 
+
+# global variables
+my %config;
+my %lights;
+my %suncycle;
+my $pause;
+my $hue;
+
+my $start_time;
+my $end_time;
+my $run_time;
+
+# daemon control variables
+my $i_should_run;
+my $i_should_rerun;
+my $i_should_dump_config;
+my $i_should_reload_config;
+my $i_caught_a_signal;
+my $last_minute = 99; # initialize to an impossible value 
+my $pid;
+my $child_pid;
+my $timeout = 20;
+
+# some needed defaults:
+$config{'config'}{'logging'}{'hue_log'}   = "/var/log/hue/hued.log";
+$config{'config'}{'logging'}{'hue_state'} = "/var/log/hue/hued.state";
+
+# read the config file  
+sub open_hue_file($) {
+        my $f_hue = shift;
+        my $fh_hue;
+        my $line;
+	my $key_A;
+	my $key_B;
+	printt ("Opening hue file \"$f_hue\", and loading data...\n");
+        if (open($fh_hue, "<$f_hue")) {
+        	while ($line = readline($fh_hue)) {
+			chomp($line);
+			$line =~ s/#.*//; # remove comments
+			if ($line =~ /^\[(\S+)\]\s*$/) {
+				$key_A = $1;
+			}	
+			if ($line =~ /^\s*(\S+):\s*$/) {
+				$key_B = $1;
+			}	
+			if ($line =~ /^\s*(\S+)\s*=\s*(.*)\s*$/) {
+				$config{$key_A}{$key_B}{$1} = $2;
+				# print ("Added to config : $key_A - $key_B -> $1 => $2\n");
+			}
+		}
+        	close $fh_hue;
+        } else {
+		printt ("No config file found, running empty\n");
+	}	
+}
+
+# a very! basic function to attempt to emulate dawn and dusk's increase and decrease in light
+sub calculate_suncycle($) {
+	my $suncycle_ref = shift;
+	my $sunrise = secs(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+	my $sunset  = secs(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+	# just a ballpark attempt at guessing the length of dusk or dawn in seconds (related to latitude)
+	my $length  = int(5 + 222 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	printt("Calculating suncycle. Sunrise: $sunrise Sunset: $sunset\n");
+
+	# night
+	for my $second (0..int($sunrise - $length/2)) {
+		$$suncycle_ref{$second} = $config{'config'}{'adjust'}{'sun_bright'};
+		# printt (" -> $second -> 20\n");
+	}
+	# sunrise
+	for my $second (int($sunrise - $length/2)..int($sunrise + $length/2)) {
+		my $val = int ($config{'config'}{'adjust'}{'sun_bright'} * cos(($second - ($sunrise - $length/2))/$length * 3.1415));
+		$$suncycle_ref{int($second - $sunrise - $length/2)} = $val;
+		# printt (" -> $second -> $val\n");
+	}	
+	# day
+	for my $second (int($sunrise + $length/2)..int($sunset - $length/2)) {
+		$$suncycle_ref{$second} = -$config{'config'}{'adjust'}{'sun_bright'};
+		# printt (" -> $second -> -20\n");
+	}
+	# sunset
+	for my $second (int($sunset - $length/2)..int($sunset + $length/2)) {
+		my $val = int (-$config{'config'}{'adjust'}{'sun_bright'} * cos(($second - ($sunset - $length/2))/$length * 3.1415));
+		$$suncycle_ref{int($second - $sunset - $length/2)} = $val;
+		# printt (" -> $second -> $val\n");
+	}	
+	# night
+	for my $second (int($sunset + $length/2)..86400) {
+		$$suncycle_ref{$second} = $config{'config'}{'adjust'}{'sun_bright'};
+		# printt (" -> $second -> 20\n");
+	}
+}
+
+# search a value in an array, both numerical as alfa
+sub in($$) {
+	my $search  = shift;
+	my $arr_ref = shift;
+	foreach (@$arr_ref) {
+		return 1 if ($search eq $_);
+		return 1 if ($search == $_);
+	}
+	return 0;
+}	
+
+# convert HH:MM to seconds; :SS is ignored
+sub secs($) {
+	my $hhmm = shift;
+	my ($hh,$mm,$ss) = split (":", $hhmm);
+	return ($hh * 60 * 60 ) + ($mm * 60);
+}	
+
+# min max
+sub minmax($$$) {
+	my $val_ref = shift;
+	my $min = shift;
+	my $max = shift;
+	$$val_ref = $min if ($$val_ref < $min);
+	$$val_ref = $max if ($$val_ref > $max);
+}	
+
+# run_schedule_check; this run_schedule_checks on the timer and does matching and processing
+sub run_schedule_check() {
+	# get the needed parameters into single variables
+	my $log_file   = $config{'config'}{'logging'}{'hue_log'};
+	my $state_file = $config{'config'}{'hue'}{'hue_state'};
+	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+	my $sunrise = secs(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+	my $sunset  = secs(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+	# my $state   = stat($state_file);
+	my %schedules;
+	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
+
+	# determine which schedule(s) are applicable
+	foreach my $schedule (keys(%{$config{'schedule'}})) {
+		my $ss = secs($config{'schedule'}{$schedule}{'start_time'});
+		my $se = secs($config{'schedule'}{$schedule}{'end_time'});
+		my $sn = secs("$now_hour:$now_minute"); 
+		my @days = split (" ", $config{'schedule'}{$schedule}{'days'});
+		# if the end time is beyond midnight, add a day in seconds
+		# plus: if the now is smaller than the start, add a day to current if past midnight
+		# this works, because blindly adding a day to now will put it out of range if sone unjustly 
+		if ($se < $ss) {
+			$se += 86400;
+			$sn += 86400 if ($sn < $ss); 
+		}
+		# printt("Checking schedule: $schedule -> start: $ss, end: $se, now: $sn, days to run on: @days, dayofweek: $now_dow)\n");
+
+		# match today with schedule
+		if (in($now_dow,\@days)) {
+			my @on_lights  = split(/ /,$config{'schedule'}{$schedule}{'lights_on'});
+			my @off_lights = split(/ /,$config{'schedule'}{$schedule}{'lights_off'});
+
+
+			# first determine some stuff
+			my $adjustments = 0;
+			my $turnonoff   = 'current';
+
+			# are we in the period (here first, because of greater matching chances)
+			if ($sn > $ss and $sn < $se) {
+				$adjustments = 1;
+
+			# are we at the start?
+			} elsif ($sn == $ss) {
+				$adjustments = 1;
+				$turnonoff   = 'true';
+				
+			# are we at the end?	
+			} elsif ($sn == $se) {
+				$adjustments = 1;
+				$turnonoff   = 'false';
+			}	
+
+			# if requested
+			if ($adjustments) {
+				printt("schedule: $schedule -> start: $ss, end: $se, now: $sn, lights: @on_lights)\n");
+				my $bri_adjust = 0;
+				my $hue_adjust = 0;
+				my $sat_adjust = 0;
+
+				if ($config{'schedule'}{$schedule}{'use_suncycle'} eq "yes") {
+					$bri_adjust += adjust_for_suncycle($sn);
+				}	
+				# only adjust for weather every 10 minutes AND between sunrise and sunset, put most significant first
+				# if (($sn > $sunrise) and ($sn < $sunset) and ($sn % 600 == 0) and ($config{'schedule'}{$schedule}{'use_weather'} eq "yes")) {
+				if (($config{'schedule'}{$schedule}{'use_weather'} eq "yes")) {
+					$bri_adjust += adjust_for_weather();
+				}	
+
+				# cycle throught the lights and make adjustements
+				foreach my $light (@on_lights) {
+					# first check if there is a previous situation known
+					# then check if the current situation is different from previous
+					# if so, the lamps were altered, whatever was changed, should be left alone.
+					# the difficulty is to separate this daemon's alterations from others.
+					
+					# get current values
+					my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
+					$turnonoff = $cur_onoff if ($turnonoff eq 'current'); 
+
+					# get default values
+					my $def_bri = $lights{'defaults'}{$light}{'brightness'};
+					my $def_sat = $lights{'defaults'}{$light}{'saturation'};
+					my $def_hue = $lights{'defaults'}{$light}{'hue'};
+
+					# get previous values, but the might not exist, then initialize to 0 (not in my most preferred way)
+					my $pre_bri = $lights{'previous'}{$light}{'brightness'} || 0;
+					my $pre_sat = $lights{'previous'}{$light}{'saturation'} || 0;
+					my $pre_hue = $lights{'previous'}{$light}{'hue'} || 0;
+
+					my $new_bri;
+					my $new_sat;
+					my $new_hue;
+
+					# make some new values, and store old ones
+					if ($def_bri == $pre_bri) {
+						$new_bri = $def_bri + $bri_adjust;
+					} else {
+						$new_bri = $def_bri + $bri_adjust;
+						$lights{'previous'}{$light}{'brightness'} = $def_bri;
+					}	
+
+					if ($def_sat == $pre_sat) {
+						$new_sat = $def_sat + $sat_adjust;
+					} else {
+						$new_sat = $def_sat + $sat_adjust;
+						$lights{'previous'}{$light}{'saturation'} = $def_sat;
+					}	
+
+						
+					if ($def_hue == $pre_hue) {
+						$new_hue = $def_hue + $hue_adjust;
+					} else {
+						$new_hue = $def_hue + $hue_adjust;
+						$lights{'previous'}{$light}{'hue'} = $def_hue;
+					}	
+
+					minmax(\$new_bri,0,255);
+					minmax(\$new_sat,0,255);
+					minmax(\$new_hue,0,65535);
+
+					light_adjust($light,$turnonoff,$new_bri,$new_sat,$new_hue);
+				}	
+			}	
+		}
+	}	
+}
+
+# RC 1 = ok
+# RC 0 = not, data probabaly incomplete
+sub light_current($) {
+	my $light      = shift;
+	my $brightness = -1;
+	my $saturation = -1;
+	my $hue        = -1;
+	my $onoff;
+	my ($curl_returncode, $curl_output) = curl_hue("/lights/$light","GET",'');
+	($brightness) = ($curl_output =~ m/"bri":\s*(\d+)\s*/);
+	($saturation) = ($curl_output =~ m/"sat":\s*(\d+)\s*/);
+	($hue)        = ($curl_output =~ m/"hue":\s*(\d+)\s*/);
+	($onoff)      = ($curl_output =~ m/"on":\s*(\w+)\s*/);
+	# everything has to be in order:
+	if (($curl_returncode == 0) and ($brightness > -1) and ($saturation > -1) and ($hue > -1)) {
+		return (1, $onoff, $brightness, $saturation, $hue);
+	} else {
+		return (0,0,0,0,0);
+	}	
+}	
+	
+# RC 1 = ok
+# RC 0 = not ok
+sub light_adjust($$$$$) {
+	my $light      = shift;
+	my $onoff      = shift;
+	my $brightness = shift;
+	my $saturation = shift;
+	my $hue        = shift;
+	my $curl_data  = "{\"on\":$onoff,\"bri\":$brightness,\"sat\":$saturation,\"hue\":$hue}";
+
+	# setup a conversation to the bridge
+	my ($curl_returncode, $curl_output) = curl_hue("/lights/$light/state","PUT",$curl_data);
+	if ($curl_returncode == 0 and $curl_output =~ /success/) {
+		printt("  a+ light $light adjusted\n");
+		return 1;
+	} else {	
+		printt("  a- light $light not adjusted\n");
+		return 0;
+	}	
+}	
+
+# talk to hue
+sub curl_hue($$;$) {
+	my $api_call  = shift; # everything after userid
+	my $curl_meth = shift;
+	my $curl_data = shift;
+	my $host = $config{'config'}{'hue'}{'hue_host'};
+	my $user = $config{'config'}{'hue'}{'hue_user'};
+	my $curl_path    = "http://$host/api/${user}${api_call}";
+	my $curl_output  = "";
+	my $curl_RC      = 1;
+	my $curl_command; 
+	
+	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
+	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
+	# printt ("curl    : $curl_command\n");
+	
+	if ($child_pid = open (CO,"-|","$curl_command")) {
+		alarm($timeout);
+		while (<CO>) {
+			$curl_output .= $_;	
+		}
+		close(CO);
+		$curl_RC = $?;
+		alarm(0);
+	}
+	# printt ("    - curl RC : $curl_RC\n");
+	# printt ("  x- curl out: $curl_output\n");
+	return ($curl_RC, $curl_output);
+}	
+	
+	
+# does something with the sun
+sub adjust_for_suncycle($) {
+	my $sn = shift; # now
+	$sn -= 86400 if ($sn > 86400); 
+	printt(" -- suncycle : $suncycle{$sn}\n");			
+	return $suncycle{$sn}; # return the adjusted value (precalculated)
+}
+
+# does something with weather, returns extra brightness
+sub adjust_for_weather() {
+	my $return_value = 0; # default is to change nothing
+	my $longitude = $config{'config'}{'location'}{'long'};
+	my $latitude  = $config{'config'}{'location'}{'lat'};
+	my $open_weather_map_url = "http://api.openweathermap.org/data/2.5/weather?mode=json&units=metric&lat=$latitude&lon=$longitude";
+	my $curl_output;
+	my $curl_returncode;
+	my $clouds = 0;
+
+	# setup a curl session to openweathermap
+	my $curl      = WWW::Curl::Easy->new;
+	$curl->setopt(CURLOPT_HEADER,1);
+	$curl->setopt(CURLOPT_URL, $open_weather_map_url);
+	$curl->setopt(CURLOPT_WRITEDATA, \$curl_output);
+	$curl_returncode = $curl->perform;
+	if ($curl_returncode == 0) {
+		# ok
+		($clouds) = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
+		$return_value += int($clouds * ($config{'config'}{'adjust'}{'weather_bright'} / 100)); # $clouds is a %, adjust to up to $weather_bright units
+		printt(" -- clouds   : $clouds -> out: +$return_value\n");			
+	} else {
+		# curl not ok
+		printt(" !! curl to $open_weather_map_url failed\n");
+	}	
+	return $return_value;
+}
+
+# nice and tidy
+sub self_clean() {
+	# get the needed parameters into single variables
+	my $log_file   = $config{'config'}{'logging'}{'hue_log'};
+	my $log_size   = $config{'config'}{'logging'}{'hue_log_size'};
+	my $state_file = $config{'config'}{'logging'}{'hue_state'};
+	my $clean_time = $config{'config'}{'logging'}{'hue_clean_time'};
+	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+	my $ts = sprintf ("%04d-%02d-%02d %02d:%02d:%02d - ", $now_year+1900,$now_month+1,$now_day,$now_hour,$now_minute,$now_second);
+	# my @state = stat($state_file);
+	my $run_cleanup = 0;
+
+	# determine wether cleanup should run
+	# first match size
+	# then check if a timed cleanup is required
+	# if ($state[7] > $log_size) {
+	#	$run_cleanup = 1;
+	# } elsif ($clean_time eq "weekly") {
+	if ($clean_time eq "weekly") {
+		# only run if on monday
+		if ($now_dow == 1) {
+			$run_cleanup = 1;
+		}	
+	} elsif ($clean_time eq "daily") {
+		# redundant check, but here for completeness
+		$run_cleanup = 1;
+	}
+
+	# time to run
+	if ($run_cleanup) {
+		# shift copies
+		if (copy("$log_file","$log_file.1")) {
+			# empty the logfile, and print 
+			if (open (LF, ">$log_file")) {
+				print LF "$ts ==>> Self Cleaning occurred.\n";
+				print LF "$ts ==>> Running PID: $$\n";
+				close LF;
+				# update state file to indicate self clean has run
+				if (open (SF,">$state_file")) {
+					print SF "$ts";
+					close SF;
+				} else {
+					printt("State File NOT updated\n");
+				}	
+			} else {
+				printt ("Log file copy not ok\n");
+			}	
+		} else {
+			printt ("Self Cleaning FAILED\n");
+		}	
+	}
+}
+
+sub kill_child() {
+	my $count = 0;
+	$count = kill ("TERM", $child_pid);
+	if ($count > 0) {
+		printt ("command with PID $child_pid, killed due to timeout\n");
+	} else {	
+		printt ("command with PID $child_pid, failed to be killed\n");
+	}	
+}
+
+
+# mail me some stuff
+sub mail_info($$) {
+        my $title = shift;
+        my $message = shift;
+        open (PH, "|/usr/sbin/sendmail -t");
+	print (PH "To: hue\@oxoob.com\n");
+	print (PH "From: hue\@oxoob.com\n");
+	print (PH "Subject: $title\n\n");
+	print (PH "$message\n\n");
+	close(PH);
+}
+
+# SIGNAL handlers
+sub signal_term {
+	printt ("### Caught TERM / INT \n");
+      	$i_should_run=0;
+	mail_info("hued: ended","PID: $$")
+}
+
+sub signal_hup {
+	printt ("### Caught HUP - reloading config \n");
+	$i_should_reload_config=1;
+	$i_caught_a_signal=1;
+}
+
+sub signal_usr1 {
+	printt ("### Caught USR1 - dumping current config\n");
+	$i_should_dump_config=1;
+	$i_caught_a_signal=1;
+} 
+
+sub signal_usr2 {
+	printt ("### Caught USR2 - restart\n");
+	$i_should_dump_config=1;
+       	$i_should_rerun=1;
+}
+
+# loads config, but empties it first
+sub load_config() {
+	%config = ();
+
+	# some needed defaults:
+	$config{'config'}{'logging'}{'hue_log'}   = "/var/log/hue/hued.log";
+	$config{'config'}{'logging'}{'hue_state'} = "/var/log/hue/hued.state";
+  
+  	# open the config file (in same dir as daemon - for now)
+	open_hue_file("hue.conf");
+}	
+	
+# dump some config variables	
+sub dump_config() {
+	# or at least part of it.
+	print "\nCurrently loaded data:";
+	print "\n\n";
+	print "output to                : $config{'config'}{'logging'}{'hue_log'}\n";
+	print "state                    : $config{'config'}{'logging'}{'hue_state'}\n";
+	print "log file size            : $config{'config'}{'logging'}{'hue_log_size'}\n";
+	print "clean time               : $config{'config'}{'logging'}{'hue_clean_time'}\n";
+	print "hue host                 : $config{'config'}{'hue'}{'hue_host'}\n";
+	print "hue user                 : $config{'config'}{'hue'}{'hue_user'}\n";
+	print "current pid              : $$\n";
+}
+
+# output redirection
+sub set_STDOUT($) {
+	my $outfile=shift;
+	open(F, ">>$outfile") || die "\nCouldn't open logfile\n";
+	*STDOUT = *F;	
+	$| = 1;
+}
+
+sub set_STDERR($) {
+	my $outfile=shift;
+	open(F, ">>$outfile") || die "\nCouldn't open logfile\n";
+        *STDERR = *F;
+        $| = 1;
+}
+
+# print with a timestamp
+sub printt($) {
+	my $message=shift;
+	my ($year,$month,$day,$hour,$minute,$second) = (localtime)[5,4,3,2,1,0];
+	printf ("%04d-%02d-%02d %02d:%02d:%02d - ",$year+1900,$month+1,$day,$hour,$minute,$second);
+	print $message;
+}
+
+#--------------------------
+# main
+#--------------------------
+
+# set_STDERR("hued.log");
+# daemonize this MF! (from the Perl Cookbook)
+# fork
+
+### $pid = fork;
+# exit parent
+### exit if $pid;
+# check
+### die "Couldn't fork $!\n" unless defined($pid);
+# diassociate from controlling terminal..
+### POSIX:setsid() or die "Can't start a new session $!\n";
+
+printt ("hued started - using PID: $$\n");
+
+### set_STDOUT($config{'config'}{'logging'}{'hue_log'});
+print "\n";
+### printt ("hued started - using PID: $$\n");
+# catch signals
+$SIG{INT} = $SIG{TERM} = \&signal_term;
+$SIG{HUP} = \&signal_hup;
+$SIG{USR1} = \&signal_usr1;
+$SIG{USR2} = \&signal_usr2;
+$SIG{ALRM} = \&kill_child;
+
+# end of daemonisation
+
+load_config();
+calculate_suncycle(\%suncycle);
+%{$lights{'defaults'}} = %{$config{'lights_defaults'}};
+
+$i_should_run=1;
+$i_should_rerun=0;
+$i_should_dump_config=0;
+$i_should_reload_config=0;
+$i_caught_a_signal=0;
+
+
+while ($i_should_run) {
+	# wait 10 seconds -> run_schedule_check every 10 seconds.
+	# this implies that an extra is required to prevent
+	# running multiple times during the same minute.
+	select (undef,undef,undef,10);
+
+	# what is now?
+	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+
+	# run_schedule_check every minute, but only once a minute
+	# that means only trigger when the minute has changed
+	if ($now_minute != $last_minute) {
+		run_schedule_check();
+
+		# at 2:00 in the morning, do selfcleaning, and calculate the suncycle for the day
+		if (($now_hour == 0) and ($now_minute == 0)) {
+			self_clean();
+			calculate_suncycle(\%suncycle);
+		}	
+		$last_minute = $now_minute;
+	}	
+
+	# now handle all other stuff that needs to be taken care of
+	if ($i_should_dump_config) {
+		dump_config();
+	}
+	if ($i_should_reload_config) {
+		load_config();
+	}
+	
+	$i_should_dump_config=0;
+	$i_should_reload_config=0;
+	$i_caught_a_signal=0;
+
+	if ($i_should_rerun) {
+		close(PH);
+		my $newpid = fork();
+		printt ("FORKED: $$ -> $newpid\n");
+		$i_should_run=1;
+		$i_should_rerun=0;
+		exit if ($newpid);
+	}	
+}
+
+
+printt ("hued ended succesfully, PID: $$\n");
+exit 0;
