@@ -7,9 +7,6 @@ use File::stat;
 use File::Copy;
 use DateTime;
 use Astro::Sunrise;
-# the WWW::Curl is still used, but adds no value at the moment, will be phased out in favor of CLI curl (for consistency)
-use WWW::Curl;
-use WWW::Curl::Easy;
 
 my $curl = "/usr/bin/curl"; 
 
@@ -50,7 +47,7 @@ sub open_hue_file($) {
         if (open($fh_hue, "<$f_hue")) {
         	while ($line = readline($fh_hue)) {
 			chomp($line);
-			$line =~ s/#.*//; # remove comments
+			$line =~ s/\s*#.*//; # remove comments
 			if ($line =~ /^\[(\S+)\]\s*$/) {
 				$key_A = $1;
 			}	
@@ -319,7 +316,7 @@ sub curl_hue($$;$) {
 	# a PUT of POST needs data with a -d option
 	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
 	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
-	# printt ("curl    : $curl_command\n");
+	printt ("curl    : $curl_command\n");
 	
 	if ($child_pid = open (CO,"-|","$curl_command")) {
 		alarm($timeout);
@@ -350,19 +347,25 @@ sub adjust_for_weather() {
 	my $longitude = $config{'config'}{'location'}{'long'};
 	my $latitude  = $config{'config'}{'location'}{'lat'};
 	my $open_weather_map_url = "http://api.openweathermap.org/data/2.5/weather?mode=json&units=metric&lat=$latitude&lon=$longitude";
+	my $curl_command = "$curl -s -f -X GET -H 'Content-Type: application/json' '$open_weather_map_url'";
 	my $curl_output;
 	my $curl_returncode;
 	my $clouds = 0;
 
 	# setup a curl session to openweathermap
-	my $curl      = WWW::Curl::Easy->new;
-	$curl->setopt(CURLOPT_HEADER,1);
-	$curl->setopt(CURLOPT_URL, $open_weather_map_url);
-	$curl->setopt(CURLOPT_WRITEDATA, \$curl_output);
-	$curl_returncode = $curl->perform;
+	printt ("curl    : $curl_command\n");
+	if ($child_pid = open (CO,"-|","$curl_command")) {
+		alarm($timeout);
+		while (<CO>) {
+			$curl_output .= $_;	
+		}
+		close(CO);
+		$curl_returncode = $?;
+		alarm(0);
+	}
 	if ($curl_returncode == 0) {
 		# ok
-		($clouds) = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
+		$clouds = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
 		$return_value += int($clouds * ($config{'config'}{'adjust'}{'weather_bright'} / 100)); # $clouds is a %, adjust to up to $weather_bright units
 		printt(" -- clouds   : $clouds -> out: +$return_value\n");			
 	} else {
@@ -527,7 +530,7 @@ sub printt($) {
 #--------------------------
 
 # unbuffered output
-$| = 1
+$| = 1;
 
 # set_STDERR("hued.log");
 # daemonize this MF! (from the Perl Cookbook)
