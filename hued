@@ -162,29 +162,29 @@ sub run_schedule_check() {
 			my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights_on'});
 			my @off_lights = split(/\s+/,$config{'schedule'}{$schedule}{'lights_off'});
 
-
 			# first determine some stuff
 			my $adjustments = 0;
-			my $turnonoff   = 'current';
+			my $turnon   = 'nothing';
 
 			# are we in the period (here first, because of greater matching chances)
 			if ($sn > $ss and $sn < $se) {
 				$adjustments = 1;
+				$turnon   = 'current';
 
 			# are we at the start?
 			} elsif ($sn == $ss) {
 				$adjustments = 1;
-				$turnonoff   = 'true';
+				$turnon   = 'true';
 				
 			# are we at the end?	
 			} elsif ($sn == $se) {
 				$adjustments = 1;
-				$turnonoff   = 'false';
+				$turnon   = 'false';
 			}	
 
 			# if requested
 			if ($adjustments) {
-				printt("schedule: $schedule -> start: $ss, end: $se, now: $sn, lights: @on_lights)\n");
+				printt("schedule: $schedule -> start: $ss, end: $se, now: $sn, lights: @on_lights\n");
 				my $bri_adjust = 0;
 				my $hue_adjust = 0;
 				my $sat_adjust = 0;
@@ -208,54 +208,66 @@ sub run_schedule_check() {
 					
 					# get current values
 					my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
-					$turnonoff = $cur_onoff if ($turnonoff eq 'current'); 
+					$turnon = $cur_onoff if ($turnon eq 'current'); 
 
-					# get default values
-					my $def_bri = $lights{'defaults'}{$light}{'brightness'};
-					my $def_sat = $lights{'defaults'}{$light}{'saturation'};
-					my $def_hue = $lights{'defaults'}{$light}{'hue'};
-
-					# get previous values, but the might not exist, then initialize to 0 (not in my most preferred way)
-					my $pre_bri = $lights{'previous'}{$light}{'brightness'} || 0;
-					my $pre_sat = $lights{'previous'}{$light}{'saturation'} || 0;
-					my $pre_hue = $lights{'previous'}{$light}{'hue'} || 0;
-
-					my $new_bri;
-					my $new_sat;
-					my $new_hue;
-
-					# make some new values, and store old ones
-					if ($def_bri == $pre_bri) {
-						$new_bri = $def_bri + $bri_adjust;
-					} else {
-						$new_bri = $def_bri + $bri_adjust;
+					# on start -and only then- , just reset the previous values to the defaults.
+					if ($turnon eq "true") {
 						$lights{'previous'}{$light}{'brightness'} = $def_bri;
-					}	
-
-					if ($def_sat == $pre_sat) {
-						$new_sat = $def_sat + $sat_adjust;
-					} else {
-						$new_sat = $def_sat + $sat_adjust;
 						$lights{'previous'}{$light}{'saturation'} = $def_sat;
-					}	
-						
-					if ($def_hue == $pre_hue) {
-						$new_hue = $def_hue + $hue_adjust;
-					} else {
-						$new_hue = $def_hue + $hue_adjust;
-						$lights{'previous'}{$light}{'hue'} = $def_hue;
+						$lights{'previous'}{$light}{'hue'}        = $def_hue;
 					}	
 
-					minmax(\$new_bri,0,255);
-					minmax(\$new_sat,0,255);
-					minmax(\$new_hue,0,65535);
+					$new_bri = new_brigtness($light, $cur_bri, $bri_adjust);
+					$new_sat = new_saturation($light, $cur_sat, $sat_adjust);
+					$new_hue = new_hue($light, $cur_hue, $hue_adjust);
 
-					light_adjust($light,$turnonoff,$new_bri,$new_sat,$new_hue);
+					light_adjust($light,$turnon,$new_bri,$new_sat,$new_hue);
+
+					# post operation, store current values as previous
+					$lights{'previous'}{$light}{'brightness'} = $cur_bri;
+					$lights{'previous'}{$light}{'saturation'} = $cur_sat;
+					$lights{'previous'}{$light}{'hue'}        = $cur_hue;
+
+					$lights{'previous'}{$light}{'adj_brightness'} = $bri_adjust;
+					$lights{'previous'}{$light}{'adj_saturation'} = $sat_adjust;
+					$lights{'previous'}{$light}{'adj_hue'}        = $hue_adjust;
 				}	
 			}	
 		}
 	}	
 }
+sub new_brigtness($$$) {
+	my $light        = shift;
+	my $cur_bri      = shift;
+	my $bri_adjust   = shift;
+	# get default values
+	my $def_bri      = $lights{'defaults'}{$light}{'brightness'};
+	# init new values;
+	my $new_bri      = $def_bri;
+	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
+	# sidenote: the previous values should be stored without the adjustments
+	#   -> because aotherwise, the light would be at max in a few steps..
+	my $pre_bri      = $lights{'previous'}{$light}{'brightness'} || -1;
+	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
+	my $pre_adj_bri  = $lights{'previous'}{$light}{'adj_brightness'} || 0;
+
+	# if the previous = -1, it wasn't set, if current is set, 
+	if ($pre_bri == -1) {
+		# for now, do nothing 
+
+	# if the previous matches the default, the daemon set it, so it can be adjusted
+	} elsif ($pre_bri == $def_bri) {
+		$new_bri = $def_bri + $bri_adjust;
+
+	# else use current as a basis
+	} else {
+		$new_bri = $cur_bri - $pre_adj_bri + $bri_adjust;
+	}	
+	
+	minmax(\$new_bri,0,255);
+	return $new_bri;
+}	
+	
 
 # RC 1 = ok + current values
 # RC 0 = not, data probably incomplete
@@ -479,6 +491,7 @@ sub signal_usr2 {
 # loads config, but empties it first
 sub load_config() {
 	%config = ();
+	%lights = ();
 
 	# some needed defaults:
 	$config{'config'}{'logging'}{'hue_log'}   = "/var/log/hue/hued.log";
