@@ -7,8 +7,7 @@ use File::stat;
 use File::Copy;
 use DateTime;
 use Astro::Sunrise;
-
-my $curl = "/usr/bin/curl"; 
+use Data::Dumper;
 
 # global variables
 my %config;
@@ -16,6 +15,7 @@ my %lights;
 my %suncycle;
 my $pause;
 my $hue;
+my $clouds; # global var for storing cloudiness (so it does not have to be checked all the time)
 
 my $start_time;
 my $end_time;
@@ -31,6 +31,9 @@ my $last_minute = 99; # initialize to an impossible value
 my $pid;
 my $child_pid;
 my $timeout = 20;
+
+# external commands
+my $curl = "/usr/bin/curl"; 
 
 # some needed defaults:
 $config{'config'}{'logging'}{'hue_log'}   = "/var/log/hue/hued.log";
@@ -66,6 +69,7 @@ sub open_hue_file($) {
 }
 
 # a very! basic function to attempt to emulate dawn and dusk's increase and decrease in light
+# expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. same as cloudiness
 sub calculate_suncycle($) {
 	my $suncycle_ref = shift;
 	my $sunrise = secs(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
@@ -76,30 +80,25 @@ sub calculate_suncycle($) {
 
 	# night
 	for my $second (0..int($sunrise - $length/2)) {
-		$$suncycle_ref{$second} = $config{'config'}{'adjust'}{'sun_bright'};
-		# printt (" -> $second -> 20\n");
+		$$suncycle_ref{$second} = 100;
 	}
 	# sunrise
 	for my $second (int($sunrise - $length/2)..int($sunrise + $length/2)) {
-		my $val = int ($config{'config'}{'adjust'}{'sun_bright'} * cos(($second - ($sunrise - $length/2))/$length * 3.1415));
+		my $val = int (50 + 50 * cos(($second - ($sunrise - $length/2))/$length * 3.1415)); 
 		$$suncycle_ref{int($second - $sunrise - $length/2)} = $val;
-		# printt (" -> $second -> $val\n");
 	}	
 	# day
 	for my $second (int($sunrise + $length/2)..int($sunset - $length/2)) {
-		$$suncycle_ref{$second} = -$config{'config'}{'adjust'}{'sun_bright'};
-		# printt (" -> $second -> -20\n");
+		$$suncycle_ref{$second} = 0;
 	}
 	# sunset
 	for my $second (int($sunset - $length/2)..int($sunset + $length/2)) {
-		my $val = int (-$config{'config'}{'adjust'}{'sun_bright'} * cos(($second - ($sunset - $length/2))/$length * 3.1415));
+		my $val = int (50 - 50 * cos(($second - ($sunset - $length/2))/$length * 3.1415)); 
 		$$suncycle_ref{int($second - $sunset - $length/2)} = $val;
-		# printt (" -> $second -> $val\n");
 	}	
 	# night
 	for my $second (int($sunset + $length/2)..86400) {
-		$$suncycle_ref{$second} = $config{'config'}{'adjust'}{'sun_bright'};
-		# printt (" -> $second -> 20\n");
+		$$suncycle_ref{$second} = 100;
 	}
 }
 
@@ -142,6 +141,7 @@ sub run_schedule_check() {
 	my %schedules;
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
+	print Dumper (\%lights);
 	# determine which schedule(s) are applicable
 	foreach my $schedule (keys(%{$config{'schedule'}})) {
 		my $ss = secs($config{'schedule'}{$schedule}{'start_time'});
@@ -155,7 +155,7 @@ sub run_schedule_check() {
 			$se += 86400;
 			$sn += 86400 if ($sn < $ss); 
 		}
-		# printt("Checking schedule: $schedule -> start: $ss, end: $se, now: $sn, days to run on: @days, dayofweek: $now_dow)\n");
+		printt("Checking schedule: $schedule -> start: $ss, end: $se, now: $sn, days to run on: @days, dayofweek: $now_dow)\n");
 
 		# match today with schedule
 		if (in($now_dow,\@days)) {
@@ -185,17 +185,40 @@ sub run_schedule_check() {
 			# if requested
 			if ($adjustments) {
 				printt("schedule: $schedule -> start: $ss, end: $se, now: $sn, lights: @on_lights\n");
+
 				my $bri_adjust = 0;
 				my $hue_adjust = 0;
 				my $sat_adjust = 0;
+				my $sun;
+
+				if ($config{'schedule'}{$schedule}{'temperature'} eq "warmer") {
+					$hue_adjust = -$config{'config'}{'adjust'}{'hue'};
+					$sat_adjust =  $config{'config'}{'adjust'}{'sat'};
+				} elsif ($config{'schedule'}{$schedule}{'temperature'} eq "cooler") {
+					$hue_adjust =  $config{'config'}{'adjust'}{'hue'};
+					$sat_adjust = -$config{'config'}{'adjust'}{'sat'};
+				}	
+
+				if ($config{'schedule'}{$schedule}{'brightness'} eq "brighter") {
+					$bri_adjust =  $config{'config'}{'adjust'}{'base'};
+				} elsif ($config{'schedule'}{$schedule}{'brightness'} eq "darker") {
+					$bri_adjust = -$config{'config'}{'adjust'}{'base'};
+				}	
 
 				if ($config{'schedule'}{$schedule}{'use_suncycle'} eq "yes") {
-					$bri_adjust += adjust_for_suncycle($sn);
+					# get the adjustement for sun cycle (%)
+					$sun = get_suncycle($sn);
+					# recalculate the adjustment, using the returned % and the configured base value value
+					$bri_adjust = $bri_adjust + int($config{'config'}{'adjust'}{'sun'} * ($sun / 100));
+					
 				}	
 				# only adjust for weather every 10 minutes AND between sunrise and sunset, put most significant first
 				# if (($sn > $sunrise) and ($sn < $sunset) and ($sn % 600 == 0) and ($config{'schedule'}{$schedule}{'use_weather'} eq "yes")) {
 				if (($config{'schedule'}{$schedule}{'use_weather'} eq "yes")) {
-					$bri_adjust += adjust_for_weather();
+					# get the cloudiness from external source (%)
+					$clouds = get_cloudiness();
+					# recalculate the adjustment, using the returned % and the configured base value value
+					$bri_adjust = $bri_adjust + int($config{'config'}{'adjust'}{'clouds'} * ($clouds / 100));
 				}	
 
 				# cycle throught the lights and make adjustements, only on lights that should be adjusted (which equals the ones that were
@@ -206,39 +229,55 @@ sub run_schedule_check() {
 					# if so, the lamps were altered, whatever was changed, should be left alone.
 					# the difficulty will be to separate this daemon's alterations from others.
 					
+					# my $cur_rc;
+					# my $cur_onoff;
+					# my $bri_current;
+					# my $sat_current; 
+					# my $hue_current;
+
 					# get current values
-					my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
-					$turnon = $cur_onoff if ($turnon eq 'current'); 
+					my ($cur_rc, $cur_onoff, $bri_current, $sat_current, $hue_current) = light_current($light);
+					$turnon = $cur_onoff if ($turnon eq "current"); 
 
 					# on start -and only then- , just reset the previous values to the defaults.
 					if ($turnon eq "true") {
-						$lights{'previous'}{$light}{'brightness'} = $def_bri;
-						$lights{'previous'}{$light}{'saturation'} = $def_sat;
-						$lights{'previous'}{$light}{'hue'}        = $def_hue;
+						printt (" ** schedule ($schedule) starting for light $light, setting current and previous values\n"); 
+						$lights{'previous'}{$light}{'brightness'} = $lights{'defaults'}{$light}{'brightness'};
+						$lights{'previous'}{$light}{'saturation'} = $lights{'defaults'}{$light}{'saturation'};
+						$lights{'previous'}{$light}{'hue'}        = $lights{'defaults'}{$light}{'hue'};
+
+						# also: discard the current retrieved values and replace them with defaults
+						$bri_current = $lights{'defaults'}{$light}{'brightness'};
+						$sat_current = $lights{'defaults'}{$light}{'saturation'};
+						$hue_current = $lights{'defaults'}{$light}{'hue'};
+
+						print Dumper (\%lights);
+						print ("$bri_current, $sat_current, $hue_current\n");
 					}	
 
-					$new_bri = new_brigtness($light, $cur_bri, $bri_adjust);
-					$new_sat = new_saturation($light, $cur_sat, $sat_adjust);
-					$new_hue = new_hue($light, $cur_hue, $hue_adjust);
+					my $new_bri = new_brightness($light, $bri_current, $bri_adjust);
+					my $new_sat = new_saturation($light, $sat_current, $sat_adjust);
+					my $new_hue = new_hue($light, $hue_current, $hue_adjust);
 
 					light_adjust($light,$turnon,$new_bri,$new_sat,$new_hue);
 
 					# post operation, store current values as previous
-					$lights{'previous'}{$light}{'brightness'} = $cur_bri;
-					$lights{'previous'}{$light}{'saturation'} = $cur_sat;
-					$lights{'previous'}{$light}{'hue'}        = $cur_hue;
+					$lights{'previous'}{$light}{'brightness'} = $bri_current;
+					$lights{'previous'}{$light}{'saturation'} = $sat_current;
+					$lights{'previous'}{$light}{'hue'}        = $hue_current;
 
 					$lights{'previous'}{$light}{'adj_brightness'} = $bri_adjust;
 					$lights{'previous'}{$light}{'adj_saturation'} = $sat_adjust;
 					$lights{'previous'}{$light}{'adj_hue'}        = $hue_adjust;
-				}	
-			}	
+				}
+			}
 		}
-	}	
+	}
 }
-sub new_brigtness($$$) {
+
+sub new_brightness($$$) {
 	my $light        = shift;
-	my $cur_bri      = shift;
+	my $bri_current  = shift;
 	my $bri_adjust   = shift;
 	# get default values
 	my $def_bri      = $lights{'defaults'}{$light}{'brightness'};
@@ -246,10 +285,12 @@ sub new_brigtness($$$) {
 	my $new_bri      = $def_bri;
 	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
 	# sidenote: the previous values should be stored without the adjustments
-	#   -> because aotherwise, the light would be at max in a few steps..
+	#   -> because otherwise, the light would be at max in a few steps..
 	my $pre_bri      = $lights{'previous'}{$light}{'brightness'} || -1;
 	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
 	my $pre_adj_bri  = $lights{'previous'}{$light}{'adj_brightness'} || 0;
+
+	printt (" :: new_brightness $bri_current|$bri_adjust|$def_bri|$new_bri|$pre_bri|$pre_adj_bri\n");
 
 	# if the previous = -1, it wasn't set, if current is set, 
 	if ($pre_bri == -1) {
@@ -259,13 +300,85 @@ sub new_brigtness($$$) {
 	} elsif ($pre_bri == $def_bri) {
 		$new_bri = $def_bri + $bri_adjust;
 
-	# else use current as a basis
+	# else use current as a basis, first subtract the previous adjustment then add current adjustement
+	# this is to make sure the 'base' value remains, so adjustments remain relative to that value
 	} else {
-		$new_bri = $cur_bri - $pre_adj_bri + $bri_adjust;
+		$new_bri = $bri_current - $pre_adj_bri + $bri_adjust;
 	}	
 	
 	minmax(\$new_bri,0,255);
+	printt (" :: new_brightness ----> $new_bri\n");
 	return $new_bri;
+}	
+	
+sub new_hue($$$) {
+	my $light        = shift;
+	my $hue_current  = shift;
+	my $hue_adjust   = shift;
+	# get default values
+	my $def_hue      = $lights{'defaults'}{$light}{'hue'};
+	# init new values;
+	my $new_hue      = $def_hue;
+	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
+	# sidenote: the previous values should be stored without the adjustments
+	#   -> because otherwise, the light would be at max in a few steps..
+	my $pre_hue      = $lights{'previous'}{$light}{'hue'} || -1;
+	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
+	my $pre_adj_hue  = $lights{'previous'}{$light}{'adj_hue'} || 0;
+
+	printt (" :: new_hue $hue_current|$hue_adjust|$def_hue|$new_hue|$pre_hue|$pre_adj_hue\n");
+	# if the previous = -1, it wasn't set, if current is set, 
+	if ($pre_hue == -1) {
+		# for now, do nothing 
+
+	# if the previous matches the default, the daemon set it, so it can be adjusted
+	} elsif ($pre_hue == $def_hue) {
+		$new_hue = $def_hue + $hue_adjust;
+
+	# else use current as a basis, first subtract the previous adjustment then add current adjustement
+	# this is to make sure the 'base' value remains, so adjustments remain relative to that value
+	} else {
+		$new_hue = $hue_current - $pre_adj_hue + $hue_adjust;
+	}	
+	
+	minmax(\$new_hue,0,65535);
+	printt (" :: new_hue ----> $new_hue\n");
+	return $new_hue;
+}	
+	
+sub new_saturation($$$) {
+	my $light        = shift;
+	my $sat_current  = shift;
+	my $sat_adjust   = shift;
+	# get default values
+	my $def_sat      = $lights{'defaults'}{$light}{'saturation'};
+	# init new values;
+	my $new_sat      = $def_sat;
+	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
+	# sidenote: the previous values should be stored without the adjustments
+	#   -> because otherwise, the light would be at max in a few steps..
+	my $pre_sat      = $lights{'previous'}{$light}{'saturation'} || -1;
+	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
+	my $pre_adj_sat  = $lights{'previous'}{$light}{'adj_saturation'} || 0;
+
+	printt (" :: new_saturation $sat_current|$sat_adjust|$def_sat|$new_sat|$pre_sat|$pre_adj_sat\n");
+	# if the previous = -1, it wasn't set, if current is set, 
+	if ($pre_sat == -1) {
+		# for now, do nothing 
+
+	# if the previous matches the default, the daemon set it, so it can be adjusted
+	} elsif ($pre_sat == $def_sat) {
+		$new_sat = $def_sat + $sat_adjust;
+
+	# else use current as a basis, first subtract the previous adjustment then add current adjustement
+	# this is to make sure the 'base' value remains, so adjustments remain relative to that value
+	} else {
+		$new_sat = $sat_current - $pre_adj_sat + $sat_adjust;
+	}	
+	
+	minmax(\$new_sat,0,255);
+	printt (" :: new_saturation ---> $new_sat\n");
+	return $new_sat;
 }	
 	
 
@@ -346,23 +459,23 @@ sub curl_hue($$;$) {
 	
 	
 # does something with the sun
-sub adjust_for_suncycle($) {
+sub get_suncycle($) {
 	my $sn = shift; # now
 	$sn -= 86400 if ($sn > 86400); 
 	printt(" -- suncycle : $suncycle{$sn}\n");			
 	return $suncycle{$sn}; # return the adjusted value (precalculated)
 }
 
-# does something with weather, returns extra brightness
-sub adjust_for_weather() {
-	my $return_value = 0; # default is to change nothing
+# does something with weather, returns clouds value (0-100) 
+sub get_cloudiness() {
+	my $return_value = 50; # default is somewhere in the middle
 	my $longitude = $config{'config'}{'location'}{'long'};
 	my $latitude  = $config{'config'}{'location'}{'lat'};
 	my $open_weather_map_url = "http://api.openweathermap.org/data/2.5/weather?mode=json&units=metric&lat=$latitude&lon=$longitude";
 	my $curl_command = "$curl -s -f -X GET -H 'Content-Type: application/json' '$open_weather_map_url'";
 	my $curl_output;
 	my $curl_returncode;
-	my $clouds = 0;
+	my $clouds = 50; # 100 = heavy overcast, 0 = clear sky
 
 	# setup a curl session to openweathermap
 	printt ("curl    : $curl_command\n");
@@ -378,12 +491,13 @@ sub adjust_for_weather() {
 	if ($curl_returncode == 0) {
 		# ok
 		$clouds = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
-		$return_value += int($clouds * ($config{'config'}{'adjust'}{'weather_bright'} / 100)); # $clouds is a %, adjust to up to $weather_bright units
-		printt(" -- clouds   : $clouds -> out: +$return_value\n");			
+		$return_value = $clouds;
+		printt(" -- clouds   : $clouds -> $return_value\n");			
 	} else {
 		# curl not ok
 		printt(" !! curl to $open_weather_map_url failed\n");
 	}	
+
 	return $return_value;
 }
 
@@ -396,6 +510,7 @@ sub self_clean() {
 	my $clean_time = $config{'config'}{'logging'}{'hue_clean_time'};
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	my $ts = sprintf ("%04d-%02d-%02d %02d:%02d:%02d - ", $now_year+1900,$now_month+1,$now_day,$now_hour,$now_minute,$now_second);
+	# hashed out, because stat throws ugly warnings. Which is not at all something I appreciate from a core module..
 	# my @state = stat($state_file);
 	my $run_cleanup = 0;
 
@@ -572,15 +687,18 @@ $SIG{ALRM} = \&kill_child;
 # end of daemonisation
 
 load_config();
+
+# prepare for first run
 calculate_suncycle(\%suncycle);
+$clouds = get_cloudiness();
 %{$lights{'defaults'}} = %{$config{'lights_defaults'}};
+print Dumper (\%lights);
 
 $i_should_run=1;
 $i_should_rerun=0;
 $i_should_dump_config=0;
 $i_should_reload_config=0;
 $i_caught_a_signal=0;
-
 
 while ($i_should_run) {
 	# wait 10 seconds -> run_schedule_check every 10 seconds.
