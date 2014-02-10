@@ -129,6 +129,97 @@ sub minmax($$$) {
 	$$val_ref = $max if ($$val_ref > $max);
 }	
 
+# sorting by start_time
+sub by_start_time {
+	secs($config{'schedule'}{$a}{'start_time'}) <=> secs($config{'schedule'}{$b}{'start_time'});
+}	
+	
+# calculate the base values per light, based on config
+# that means incuding warmer/brighter/cooler/etc. values, but not the sun and cloudiness
+# store in global %ligthts{'schedules'} 
+sub calculate_schedules() {
+	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
+
+	printt("Calculating schedules:\n");
+	# initialize a day worth of data for each light in defaults
+	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+		for (my $stamp = 0; $stamp <= 86400; $stamp = $stamp + 60) {
+			$lights{'schedules'}{$light}{$stamp}{'brightness'} = -1;
+			$lights{'schedules'}{$light}{$stamp}{'saturation'} = -1;
+			$lights{'schedules'}{$light}{$stamp}{'hue'} = -1;
+			$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = 0;
+			$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = 0;
+		}	
+	}	
+
+	# parse the configured schedules
+	foreach my $schedule (sort by_start_time keys(%{$config{'schedule'}})) {
+		my @days       = split(/\s+/,$config{'schedule'}{$schedule}{'days'});
+		if (in($now_dow,\@days)) {
+			my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights_on'});
+			my $ss = secs($config{'schedule'}{$schedule}{'start_time'});
+			my $se = secs($config{'schedule'}{$schedule}{'end_time'});
+			my $bri_adjust = 0;
+			my $sat_adjust = 0;
+			my $hue_adjust = 0;
+			my $sun_adjust = 0; 
+			my $wth_adjust = 0; 
+			printt("    $schedule => start $ss, end $se\n");
+			 
+			if ($config{'schedule'}{$schedule}{'brightness'} eq "brighter") {
+				$bri_adjust =  $config{'config'}{'adjust'}{'base'};
+			} elsif ($config{'schedule'}{$schedule}{'brightness'} eq "darker") {
+				$bri_adjust = -$config{'config'}{'adjust'}{'base'};
+			}	
+	
+			if ($config{'schedule'}{$schedule}{'temperature'} eq "warmer") {
+				$hue_adjust = -$config{'config'}{'adjust'}{'hue'};
+				$sat_adjust =  $config{'config'}{'adjust'}{'sat'};
+			} elsif ($config{'schedule'}{$schedule}{'temperature'} eq "cooler") {
+				$hue_adjust =  $config{'config'}{'adjust'}{'hue'};
+				$sat_adjust = -$config{'config'}{'adjust'}{'sat'};
+			}	
+			
+			$sun_adjust = 1 if ($config{'schedule'}{$schedule}{'use_suncycle'} eq 'yes');
+			$wth_adjust = 1 if ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes');
+
+			# normally end is bigger (later) than start
+			# if not (-> else) assume it crosses midnight and then it needs to be split up
+			if ($se > $ss) {
+				foreach my $light (@on_lights) {
+					for (my $stamp = $ss; $stamp <= $se; $stamp = $stamp + 60) {
+						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
+					}	
+				}	
+			} else {	
+				foreach my $light (@on_lights) {
+					# pre-midnight
+					for (my $stamp = $ss; $stamp <= 86400; $stamp = $stamp + 60) {
+						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
+					}	
+					# post-midnight
+					for (my $stamp = 0; $stamp <= $se; $stamp = $stamp + 60) {
+						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
+					}	
+				}
+			}	
+		}	
+	}
+}
+
 # run_schedule_check; this run_schedule_checks on the timer and does matching and processing
 sub run_schedule_check() {
 	# get the needed parameters into single variables
@@ -138,249 +229,50 @@ sub run_schedule_check() {
 	my $sunrise = secs(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
 	my $sunset  = secs(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
 	# my $state   = stat($state_file);
-	my %schedules;
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
-	print Dumper (\%lights);
-	# determine which schedule(s) are applicable
-	foreach my $schedule (keys(%{$config{'schedule'}})) {
-		my $ss = secs($config{'schedule'}{$schedule}{'start_time'});
-		my $se = secs($config{'schedule'}{$schedule}{'end_time'});
-		my $sn = secs("$now_hour:$now_minute"); 
-		my @days = split (/\s+/, $config{'schedule'}{$schedule}{'days'});
-		# if the end time is beyond midnight, add a day in seconds
-		# plus: if the now is smaller than the start, add a day to current if past midnight
-		# this works, because blindly adding a day to now will put it out of range if sone unjustly 
-		if ($se < $ss) {
-			$se += 86400;
-			$sn += 86400 if ($sn < $ss); 
-		}
-		printt("Checking schedule: $schedule -> start: $ss, end: $se, now: $sn, days to run on: @days, dayofweek: $now_dow)\n");
-
-		# match today with schedule
-		if (in($now_dow,\@days)) {
-			my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights_on'});
-			my @off_lights = split(/\s+/,$config{'schedule'}{$schedule}{'lights_off'});
-
-			# first determine some stuff
-			my $adjustments = 0;
-			my $turnon   = 'nothing';
-
-			# are we in the period (here first, because of greater matching chances)
-			if ($sn > $ss and $sn < $se) {
-				$adjustments = 1;
-				$turnon   = 'current';
-
-			# are we at the start?
-			} elsif ($sn == $ss) {
-				$adjustments = 1;
-				$turnon   = 'true';
-				
-			# are we at the end?	
-			} elsif ($sn == $se) {
-				$adjustments = 1;
-				$turnon   = 'false';
+	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+		my $stamp = secs("$now_hour:$now_minute"); 
+		if ($lights{'schedules'}{$light}{$stamp}{'brightness'} > 0) {
+			my $bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
+			my $sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
+			my $hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
+			my $sun = $lights{'schedules'}{$light}{$stamp}{'use_suncycle'};
+			my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
+			my $sun_adjust = 0;
+			my $wth_adjust = 0;
+		
+			if ($sun == 1) {
+				# get the adjustement for sun cycle (%)
+				my $sun_val = get_suncycle($stamp);
+				# recalculate the adjustment, using the returned % and the configured base value value
+				$sun_adjust = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
 			}	
 
-			# if requested
-			if ($adjustments) {
-				printt("schedule: $schedule -> start: $ss, end: $se, now: $sn, lights: @on_lights\n");
+			# only adjust for weather every 10 minutes AND between sunrise and sunset, put most significant first
+			# if (($sn > $sunrise) and ($sn < $sunset) and ($sn % 600 == 0) and ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes')) {
+			if ($wth == 1) {
+				# get the cloudiness from external source (%)
+				$clouds = get_cloudiness();
+				# recalculate the adjustment, using the returned % and the configured base value value
+				$wth_adjust = int($config{'config'}{'adjust'}{'clouds'} * ($clouds / 100));
+			}	
 
-				my $bri_adjust = 0;
-				my $hue_adjust = 0;
-				my $sat_adjust = 0;
-				my $sun;
+			# get current values
+			# my ($cur_rc, $cur_onoff, $bri_current, $sat_current, $hue_current) = light_current($light);
 
-				if ($config{'schedule'}{$schedule}{'temperature'} eq "warmer") {
-					$hue_adjust = -$config{'config'}{'adjust'}{'hue'};
-					$sat_adjust =  $config{'config'}{'adjust'}{'sat'};
-				} elsif ($config{'schedule'}{$schedule}{'temperature'} eq "cooler") {
-					$hue_adjust =  $config{'config'}{'adjust'}{'hue'};
-					$sat_adjust = -$config{'config'}{'adjust'}{'sat'};
-				}	
+			# make sure these don't go out of range
+			minmax(\$bri,0,255);
+			minmax(\$sat,0,255);
+			minmax(\$hue,0,65535);
 
-				if ($config{'schedule'}{$schedule}{'brightness'} eq "brighter") {
-					$bri_adjust =  $config{'config'}{'adjust'}{'base'};
-				} elsif ($config{'schedule'}{$schedule}{'brightness'} eq "darker") {
-					$bri_adjust = -$config{'config'}{'adjust'}{'base'};
-				}	
-
-				if ($config{'schedule'}{$schedule}{'use_suncycle'} eq "yes") {
-					# get the adjustement for sun cycle (%)
-					$sun = get_suncycle($sn);
-					# recalculate the adjustment, using the returned % and the configured base value value
-					$bri_adjust = $bri_adjust + int($config{'config'}{'adjust'}{'sun'} * ($sun / 100));
-					
-				}	
-				# only adjust for weather every 10 minutes AND between sunrise and sunset, put most significant first
-				# if (($sn > $sunrise) and ($sn < $sunset) and ($sn % 600 == 0) and ($config{'schedule'}{$schedule}{'use_weather'} eq "yes")) {
-				if (($config{'schedule'}{$schedule}{'use_weather'} eq "yes")) {
-					# get the cloudiness from external source (%)
-					$clouds = get_cloudiness();
-					# recalculate the adjustment, using the returned % and the configured base value value
-					$bri_adjust = $bri_adjust + int($config{'config'}{'adjust'}{'clouds'} * ($clouds / 100));
-				}	
-
-				# cycle throught the lights and make adjustements, only on lights that should be adjusted (which equals the ones that were
-				# requested to be on on the start of this period)
-				foreach my $light (@on_lights) {
-					# first check if there is a previous situation known
-					# then check if the current situation is different from previous
-					# if so, the lamps were altered, whatever was changed, should be left alone.
-					# the difficulty will be to separate this daemon's alterations from others.
-					
-					# my $cur_rc;
-					# my $cur_onoff;
-					# my $bri_current;
-					# my $sat_current; 
-					# my $hue_current;
-
-					# get current values
-					my ($cur_rc, $cur_onoff, $bri_current, $sat_current, $hue_current) = light_current($light);
-					$turnon = $cur_onoff if ($turnon eq "current"); 
-
-					# on start -and only then- , just reset the previous values to the defaults.
-					if ($turnon eq "true") {
-						printt (" ** schedule ($schedule) starting for light $light, setting current and previous values\n"); 
-						$lights{'previous'}{$light}{'brightness'} = $lights{'defaults'}{$light}{'brightness'};
-						$lights{'previous'}{$light}{'saturation'} = $lights{'defaults'}{$light}{'saturation'};
-						$lights{'previous'}{$light}{'hue'}        = $lights{'defaults'}{$light}{'hue'};
-
-						# also: discard the current retrieved values and replace them with defaults
-						$bri_current = $lights{'defaults'}{$light}{'brightness'};
-						$sat_current = $lights{'defaults'}{$light}{'saturation'};
-						$hue_current = $lights{'defaults'}{$light}{'hue'};
-
-						print Dumper (\%lights);
-						print ("$bri_current, $sat_current, $hue_current\n");
-					}	
-
-					my $new_bri = new_brightness($light, $bri_current, $bri_adjust);
-					my $new_sat = new_saturation($light, $sat_current, $sat_adjust);
-					my $new_hue = new_hue($light, $hue_current, $hue_adjust);
-
-					light_adjust($light,$turnon,$new_bri,$new_sat,$new_hue);
-
-					# post operation, store current values as previous
-					$lights{'previous'}{$light}{'brightness'} = $bri_current;
-					$lights{'previous'}{$light}{'saturation'} = $sat_current;
-					$lights{'previous'}{$light}{'hue'}        = $hue_current;
-
-					$lights{'previous'}{$light}{'adj_brightness'} = $bri_adjust;
-					$lights{'previous'}{$light}{'adj_saturation'} = $sat_adjust;
-					$lights{'previous'}{$light}{'adj_hue'}        = $hue_adjust;
-				}
-			}
+			light_adjust($light,'true',$bri,$sat,$hue);
+		} else {
+			# turn it off
+			light_adjust($light,'false',0,0,0);
 		}
 	}
 }
-
-sub new_brightness($$$) {
-	my $light        = shift;
-	my $bri_current  = shift;
-	my $bri_adjust   = shift;
-	# get default values
-	my $def_bri      = $lights{'defaults'}{$light}{'brightness'};
-	# init new values;
-	my $new_bri      = $def_bri;
-	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
-	# sidenote: the previous values should be stored without the adjustments
-	#   -> because otherwise, the light would be at max in a few steps..
-	my $pre_bri      = $lights{'previous'}{$light}{'brightness'} || -1;
-	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
-	my $pre_adj_bri  = $lights{'previous'}{$light}{'adj_brightness'} || 0;
-
-	printt (" :: new_brightness $bri_current|$bri_adjust|$def_bri|$new_bri|$pre_bri|$pre_adj_bri\n");
-
-	# if the previous = -1, it wasn't set, if current is set, 
-	if ($pre_bri == -1) {
-		# for now, do nothing 
-
-	# if the previous matches the default, the daemon set it, so it can be adjusted
-	} elsif ($pre_bri == $def_bri) {
-		$new_bri = $def_bri + $bri_adjust;
-
-	# else use current as a basis, first subtract the previous adjustment then add current adjustement
-	# this is to make sure the 'base' value remains, so adjustments remain relative to that value
-	} else {
-		$new_bri = $bri_current - $pre_adj_bri + $bri_adjust;
-	}	
-	
-	minmax(\$new_bri,0,255);
-	printt (" :: new_brightness ----> $new_bri\n");
-	return $new_bri;
-}	
-	
-sub new_hue($$$) {
-	my $light        = shift;
-	my $hue_current  = shift;
-	my $hue_adjust   = shift;
-	# get default values
-	my $def_hue      = $lights{'defaults'}{$light}{'hue'};
-	# init new values;
-	my $new_hue      = $def_hue;
-	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
-	# sidenote: the previous values should be stored without the adjustments
-	#   -> because otherwise, the light would be at max in a few steps..
-	my $pre_hue      = $lights{'previous'}{$light}{'hue'} || -1;
-	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
-	my $pre_adj_hue  = $lights{'previous'}{$light}{'adj_hue'} || 0;
-
-	printt (" :: new_hue $hue_current|$hue_adjust|$def_hue|$new_hue|$pre_hue|$pre_adj_hue\n");
-	# if the previous = -1, it wasn't set, if current is set, 
-	if ($pre_hue == -1) {
-		# for now, do nothing 
-
-	# if the previous matches the default, the daemon set it, so it can be adjusted
-	} elsif ($pre_hue == $def_hue) {
-		$new_hue = $def_hue + $hue_adjust;
-
-	# else use current as a basis, first subtract the previous adjustment then add current adjustement
-	# this is to make sure the 'base' value remains, so adjustments remain relative to that value
-	} else {
-		$new_hue = $hue_current - $pre_adj_hue + $hue_adjust;
-	}	
-	
-	minmax(\$new_hue,0,65535);
-	printt (" :: new_hue ----> $new_hue\n");
-	return $new_hue;
-}	
-	
-sub new_saturation($$$) {
-	my $light        = shift;
-	my $sat_current  = shift;
-	my $sat_adjust   = shift;
-	# get default values
-	my $def_sat      = $lights{'defaults'}{$light}{'saturation'};
-	# init new values;
-	my $new_sat      = $def_sat;
-	# get previous values, if they don't exist (first run) initialize to -1 (0 is an actual value) 
-	# sidenote: the previous values should be stored without the adjustments
-	#   -> because otherwise, the light would be at max in a few steps..
-	my $pre_sat      = $lights{'previous'}{$light}{'saturation'} || -1;
-	# get the adjustments as well, or (on first run) init to 0 (which is fine here)
-	my $pre_adj_sat  = $lights{'previous'}{$light}{'adj_saturation'} || 0;
-
-	printt (" :: new_saturation $sat_current|$sat_adjust|$def_sat|$new_sat|$pre_sat|$pre_adj_sat\n");
-	# if the previous = -1, it wasn't set, if current is set, 
-	if ($pre_sat == -1) {
-		# for now, do nothing 
-
-	# if the previous matches the default, the daemon set it, so it can be adjusted
-	} elsif ($pre_sat == $def_sat) {
-		$new_sat = $def_sat + $sat_adjust;
-
-	# else use current as a basis, first subtract the previous adjustment then add current adjustement
-	# this is to make sure the 'base' value remains, so adjustments remain relative to that value
-	} else {
-		$new_sat = $sat_current - $pre_adj_sat + $sat_adjust;
-	}	
-	
-	minmax(\$new_sat,0,255);
-	printt (" :: new_saturation ---> $new_sat\n");
-	return $new_sat;
-}	
-	
 
 # RC 1 = ok + current values
 # RC 0 = not, data probably incomplete
@@ -687,12 +579,9 @@ $SIG{ALRM} = \&kill_child;
 # end of daemonisation
 
 load_config();
-
-# prepare for first run
 calculate_suncycle(\%suncycle);
+calculate_schedules();
 $clouds = get_cloudiness();
-%{$lights{'defaults'}} = %{$config{'lights_defaults'}};
-print Dumper (\%lights);
 
 $i_should_run=1;
 $i_should_rerun=0;
@@ -714,10 +603,11 @@ while ($i_should_run) {
 	if ($now_minute != $last_minute) {
 		run_schedule_check();
 
-		# at 2:00 in the morning, do selfcleaning, and calculate the suncycle for the day
+		# at 0:00 in the morning, do selfcleaning, and calculate the suncycle and schedules for the day
 		if (($now_hour == 0) and ($now_minute == 0)) {
 			self_clean();
 			calculate_suncycle(\%suncycle);
+			calculate_schedules();
 		}	
 		$last_minute = $now_minute;
 	}	
@@ -728,6 +618,8 @@ while ($i_should_run) {
 	}
 	if ($i_should_reload_config) {
 		load_config();
+		calculate_suncycle(\%suncycle);
+		calculate_schedules();
 	}
 	
 	$i_should_dump_config=0;
