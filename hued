@@ -72,33 +72,33 @@ sub open_hue_file($) {
 # expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. same as cloudiness
 sub calculate_suncycle($) {
 	my $suncycle_ref = shift;
-	my $sunrise = secs(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
-	my $sunset  = secs(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
-	# just a ballpark attempt at guessing the length of dusk or dawn in seconds (related to latitude)
-	my $length  = int(5 + 222 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	my $sunrise = int(mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})));
+	my $sunset  = int(mins(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})));
+	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
+	my $length  = int(5 + 50 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
 	printt("Calculating suncycle. Sunrise: $sunrise Sunset: $sunset\n");
 
 	# night
-	for my $second (0..int($sunrise - $length/2)) {
-		$$suncycle_ref{$second} = 100;
+	for (my $minute = 0; $minute < int($sunrise - $length/2); $minute++) {
+		$$suncycle_ref{$minute} = 100;
 	}
 	# sunrise
-	for my $second (int($sunrise - $length/2)..int($sunrise + $length/2)) {
-		my $val = int (50 + 50 * cos(($second - ($sunrise - $length/2))/$length * 3.1415)); 
-		$$suncycle_ref{int($second - $sunrise - $length/2)} = $val;
+	for (my $minute = int($sunrise - $length/2); $minute < int($sunrise + $length/2); $minute++) {
+		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/2))/$length * 3.1415)); 
+		$$suncycle_ref{int($minute - $sunrise - $length/2)} = $val;
 	}	
 	# day
-	for my $second (int($sunrise + $length/2)..int($sunset - $length/2)) {
-		$$suncycle_ref{$second} = 0;
+	for (my $minute = int($sunrise + $length/2); $minute < int($sunset - $length/2); $minute++) {
+		$$suncycle_ref{$minute} = 0;
 	}
 	# sunset
-	for my $second (int($sunset - $length/2)..int($sunset + $length/2)) {
-		my $val = int (50 - 50 * cos(($second - ($sunset - $length/2))/$length * 3.1415)); 
-		$$suncycle_ref{int($second - $sunset - $length/2)} = $val;
+	for (my $minute = int($sunset - $length/2); $minute < int($sunset + $length/2); $minute++) {
+		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/2))/$length * 3.1415)); 
+		$$suncycle_ref{int($minute - $sunset - $length/2)} = $val;
 	}	
 	# night
-	for my $second (int($sunset + $length/2)..86400) {
-		$$suncycle_ref{$second} = 100;
+	for (my $minute = int($sunset + $length/2); $minute < 86400; $minute++) {
+		$$suncycle_ref{$minute} = 100;
 	}
 }
 
@@ -114,10 +114,10 @@ sub in($$) {
 }	
 
 # convert HH:MM to seconds; :SS is ignored, which means it's rounded to the minute
-sub secs($) {
+sub mins($) {
 	my $hhmm = shift;
 	my ($hh,$mm,$ss) = split (":", $hhmm);
-	return ($hh * 60 * 60 ) + ($mm * 60);
+	return ($hh * 60) + $mm;
 }	
 
 # minmax, prevent a value for exceeding the given minimum or maximum
@@ -129,22 +129,22 @@ sub minmax($$$) {
 	$$val_ref = $max if ($$val_ref > $max);
 }	
 
-# sorting by start_time
+# sorting function to sort schedules by start_time
 sub by_start_time {
-	secs($config{'schedule'}{$a}{'start_time'}) <=> secs($config{'schedule'}{$b}{'start_time'});
+	mins($config{'schedule'}{$a}{'start_time'}) <=> mins($config{'schedule'}{$b}{'start_time'});
 }	
 	
 # calculate the base values per light, based on config
 # that means incuding warmer/brighter/cooler/etc. values, but not the sun and cloudiness
 # store in global %ligthts{'schedules'} 
-sub calculate_schedules() {
+sub calculate_default_schedules() {
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
 	printt("Calculating schedules:\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
-		for (my $stamp = 0; $stamp <= 86400; $stamp = $stamp + 60) {
+		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
 			$lights{'schedules'}{$light}{$stamp}{'brightness'} = -1;
 			$lights{'schedules'}{$light}{$stamp}{'saturation'} = -1;
 			$lights{'schedules'}{$light}{$stamp}{'hue'} = -1;
@@ -158,37 +158,46 @@ sub calculate_schedules() {
 		my @days       = split(/\s+/,$config{'schedule'}{$schedule}{'days'});
 		if (in($now_dow,\@days)) {
 			my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights_on'});
-			my $ss = secs($config{'schedule'}{$schedule}{'start_time'});
-			my $se = secs($config{'schedule'}{$schedule}{'end_time'});
+			my $ss = mins($config{'schedule'}{$schedule}{'start_time'});
+			my $se = mins($config{'schedule'}{$schedule}{'end_time'});
 			my $bri_adjust = 0;
 			my $sat_adjust = 0;
 			my $hue_adjust = 0;
 			my $sun_adjust = 0; 
 			my $wth_adjust = 0; 
-			printt("    $schedule => start $ss, end $se\n");
 			 
-			if ($config{'schedule'}{$schedule}{'brightness'} eq "brighter") {
-				$bri_adjust =  $config{'config'}{'adjust'}{'base'};
-			} elsif ($config{'schedule'}{$schedule}{'brightness'} eq "darker") {
-				$bri_adjust = -$config{'config'}{'adjust'}{'base'};
+			if (exists($config{'schedule'}{$schedule}{'brightness'})) {
+				if ($config{'schedule'}{$schedule}{'brightness'} eq "brighter") {
+					$bri_adjust =  $config{'config'}{'adjust'}{'base'};
+				} elsif ($config{'schedule'}{$schedule}{'brightness'} eq "darker") {
+					$bri_adjust = -$config{'config'}{'adjust'}{'base'};
+				}	
 			}	
 	
-			if ($config{'schedule'}{$schedule}{'temperature'} eq "warmer") {
-				$hue_adjust = -$config{'config'}{'adjust'}{'hue'};
-				$sat_adjust =  $config{'config'}{'adjust'}{'sat'};
-			} elsif ($config{'schedule'}{$schedule}{'temperature'} eq "cooler") {
-				$hue_adjust =  $config{'config'}{'adjust'}{'hue'};
-				$sat_adjust = -$config{'config'}{'adjust'}{'sat'};
+			if (exists($config{'schedule'}{$schedule}{'temperature'})) {
+				if ($config{'schedule'}{$schedule}{'temperature'} eq "warmer") {
+					$hue_adjust = -$config{'config'}{'adjust'}{'hue'};
+					$sat_adjust =  $config{'config'}{'adjust'}{'sat'};
+				} elsif ($config{'schedule'}{$schedule}{'temperature'} eq "cooler") {
+					$hue_adjust =  $config{'config'}{'adjust'}{'hue'};
+					$sat_adjust = -$config{'config'}{'adjust'}{'sat'};
+				}	
 			}	
 			
-			$sun_adjust = 1 if ($config{'schedule'}{$schedule}{'use_suncycle'} eq 'yes');
-			$wth_adjust = 1 if ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes');
+			if (exists($config{'schedule'}{$schedule}{'use_suncycle'}) and ($config{'schedule'}{$schedule}{'use_suncycle'} eq 'yes')) {
+				$sun_adjust = 1;
+			}
 
+			if (exists($config{'schedule'}{$schedule}{'use_weather'}) and ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes')) {
+				$wth_adjust = 1;
+			}
+
+			printt(" ==> $schedule => start $ss, end $se, bri+/-: $bri_adjust, sat+/-: $sat_adjust, hue+/-: $hue_adjust, sun: $sun_adjust, weather: $wth_adjust\n");
 			# normally end is bigger (later) than start
 			# if not (-> else) assume it crosses midnight and then it needs to be split up
 			if ($se > $ss) {
 				foreach my $light (@on_lights) {
-					for (my $stamp = $ss; $stamp <= $se; $stamp = $stamp + 60) {
+					for (my $stamp = $ss; $stamp <= $se; $stamp++) {
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
@@ -199,7 +208,7 @@ sub calculate_schedules() {
 			} else {	
 				foreach my $light (@on_lights) {
 					# pre-midnight
-					for (my $stamp = $ss; $stamp <= 86400; $stamp = $stamp + 60) {
+					for (my $stamp = $ss; $stamp <= 1440; $stamp++) {
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
@@ -207,7 +216,7 @@ sub calculate_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 					}	
 					# post-midnight
-					for (my $stamp = 0; $stamp <= $se; $stamp = $stamp + 60) {
+					for (my $stamp = 0; $stamp <= $se; $stamp++) {
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
@@ -218,55 +227,107 @@ sub calculate_schedules() {
 			}	
 		}	
 	}
+	# TODO: do a smoothing pass on the default schedule
+	# foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+	# fill in the blanks.
+	#}	
+}
+
+sub initialize_current_light_values() {
+	# store the current values as previous
+	printt ("Initializing initial light values\n");
+	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+		my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
+		$lights{'previous'}{$light}{'brightness'} = $cur_bri;
+		$lights{'previous'}{$light}{'saturation'} = $cur_sat;
+		$lights{'previous'}{$light}{'hue'} = $cur_hue;
+		printt (" ... $light -> $cur_onoff -> $cur_bri -> $cur_sat -> $cur_hue\n");
+	}	
 }
 
 # run_schedule_check; this run_schedule_checks on the timer and does matching and processing
 sub run_schedule_check() {
 	# get the needed parameters into single variables
-	my $log_file   = $config{'config'}{'logging'}{'hue_log'};
-	my $state_file = $config{'config'}{'hue'}{'hue_state'};
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
-	my $sunrise = secs(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
-	my $sunset  = secs(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+	my $stamp   = mins("$now_hour:$now_minute"); 
+	my $sunrise = mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+	my $sunset  = mins(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
 	# my $state   = stat($state_file);
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
-		my $stamp = secs("$now_hour:$now_minute"); 
 		if ($lights{'schedules'}{$light}{$stamp}{'brightness'} > 0) {
 			my $bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
 			my $sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
 			my $hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
 			my $sun = $lights{'schedules'}{$light}{$stamp}{'use_suncycle'};
 			my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
-			my $sun_adjust = 0;
-			my $wth_adjust = 0;
+			my $sun_val = 0;
+			my $bri_adjust = 0;
+			my $adjust = 0;
 		
 			if ($sun == 1) {
 				# get the adjustement for sun cycle (%)
-				my $sun_val = get_suncycle($stamp);
+				$sun_val = get_suncycle($stamp);
 				# recalculate the adjustment, using the returned % and the configured base value value
-				$sun_adjust = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+				$bri_adjust += int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
 			}	
 
 			# only adjust for weather every 10 minutes AND between sunrise and sunset, put most significant first
-			# if (($sn > $sunrise) and ($sn < $sunset) and ($sn % 600 == 0) and ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes')) {
+			# if (($stamp > $sunrise) and ($stamp < $sunset) and ($stamp % 600 == 0) and ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes')) {
 			if ($wth == 1) {
 				# get the cloudiness from external source (%)
 				$clouds = get_cloudiness();
 				# recalculate the adjustment, using the returned % and the configured base value value
-				$wth_adjust = int($config{'config'}{'adjust'}{'clouds'} * ($clouds / 100));
+				# also adjust for the sun, as the sun_adjust gets higher, the effect of the weather adjustment should get lower
+				my $cld_adjust = int($config{'config'}{'adjust'}{'clouds'} * ($clouds / 100));
+				$bri_adjust += (100 - $sun_val) * $cld_adjust;
 			}	
 
+			# finalize brightness
+			$bri += $bri_adjust;
+
 			# get current values
-			# my ($cur_rc, $cur_onoff, $bri_current, $sat_current, $hue_current) = light_current($light);
+			my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
 
-			# make sure these don't go out of range
-			minmax(\$bri,0,255);
-			minmax(\$sat,0,255);
-			minmax(\$hue,0,65535);
+			# verify if this is a first run or not.
+			if (not exists($lights{'previous'}{$light}{'brightness'})) {
+				$adjust = 1;
+			} else {	
+				# if one or more values is not the same as the previous value, it was probably modified, leave it alone
+				if (($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
+					($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
+					($cur_hue != $lights{'previous'}{$light}{'hue'}) or
+					($cur_onoff eq 'false')) {
+					$adjust = 0;
+				} elsif (($cur_bri == $lights{'previous'}{$light}{'brightness'}) and
+					($cur_sat == $lights{'previous'}{$light}{'saturation'}) and
+					($cur_hue == $lights{'previous'}{$light}{'hue'}) and
+					($cur_onoff eq 'true')) {
+					$adjust = 2;
+				} else {
+					$adjust = 1;
+				}	
+			}
 
-			light_adjust($light,'true',$bri,$sat,$hue);
+			if ($adjust == 1) {
+				# make sure these don't go out of range
+				minmax(\$bri,0,255);
+				minmax(\$sat,0,255);
+				minmax(\$hue,0,65535);
+				light_adjust($light,'true',$bri,$sat,$hue);
+				printt ("$light adjusted\n");
+				# store the current values as previous
+				$lights{'previous'}{$light}{'brightness'} = $bri;
+				$lights{'previous'}{$light}{'saturation'} = $sat;
+				$lights{'previous'}{$light}{'hue'} = $hue;
+			} elsif ($adjust == 2) {	
+				printt ("$light remains the same\n");
+			} elsif ($adjust == 0) {	
+				printt ("$light was not adjusted (altered externally)\n");
+			}	
+			printt ("$light - current: $cur_bri/$cur_sat/$cur_hue vs. set: $bri/$sat/$hue\n");
+
 		} else {
 			# turn it off
 			light_adjust($light,'false',0,0,0);
@@ -310,10 +371,10 @@ sub light_adjust($$$$$) {
 	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
 	# to get a match on success. TODO
 	if ($curl_returncode == 0 and $curl_output =~ /success/) {
-		printt("  a+ light $light adjusted\n");
+		# printt("  a+ light $light adjusted\n");
 		return 1;
 	} else {	
-		printt("  a- light $light not adjusted\n");
+		# printt("  a- light $light not adjusted\n");
 		return 0;
 	}	
 }	
@@ -333,7 +394,7 @@ sub curl_hue($$;$) {
 	# a PUT of POST needs data with a -d option
 	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
 	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
-	printt ("curl    : $curl_command\n");
+	# printt ("curl    : $curl_command\n");
 	
 	if ($child_pid = open (CO,"-|","$curl_command")) {
 		alarm($timeout);
@@ -352,10 +413,10 @@ sub curl_hue($$;$) {
 	
 # does something with the sun
 sub get_suncycle($) {
-	my $sn = shift; # now
-	$sn -= 86400 if ($sn > 86400); 
-	printt(" -- suncycle : $suncycle{$sn}\n");			
-	return $suncycle{$sn}; # return the adjusted value (precalculated)
+	my $stamp  = shift; # now
+	my $result = 0;
+	$result = $suncycle{$stamp} if ($suncycle{$stamp});
+	return $result;
 }
 
 # does something with weather, returns clouds value (0-100) 
@@ -370,7 +431,7 @@ sub get_cloudiness() {
 	my $clouds = 50; # 100 = heavy overcast, 0 = clear sky
 
 	# setup a curl session to openweathermap
-	printt ("curl    : $curl_command\n");
+	# printt ("curl    : $curl_command\n");
 	if ($child_pid = open (CO,"-|","$curl_command")) {
 		alarm($timeout);
 		while (<CO>) {
@@ -580,7 +641,8 @@ $SIG{ALRM} = \&kill_child;
 
 load_config();
 calculate_suncycle(\%suncycle);
-calculate_schedules();
+calculate_default_schedules();
+# initialize_current_light_values();
 $clouds = get_cloudiness();
 
 $i_should_run=1;
@@ -591,7 +653,7 @@ $i_caught_a_signal=0;
 
 while ($i_should_run) {
 	# wait 10 seconds -> run_schedule_check every 10 seconds.
-	# this implies that an extra is required to prevent
+	# this implies that an extra check is required to prevent
 	# running multiple times during the same minute.
 	select (undef,undef,undef,10);
 
@@ -607,7 +669,7 @@ while ($i_should_run) {
 		if (($now_hour == 0) and ($now_minute == 0)) {
 			self_clean();
 			calculate_suncycle(\%suncycle);
-			calculate_schedules();
+			calculate_default_schedules();
 		}	
 		$last_minute = $now_minute;
 	}	
@@ -619,7 +681,8 @@ while ($i_should_run) {
 	if ($i_should_reload_config) {
 		load_config();
 		calculate_suncycle(\%suncycle);
-		calculate_schedules();
+		calculate_default_schedules();
+		# initialize_current_light_values();
 	}
 	
 	$i_should_dump_config=0;
