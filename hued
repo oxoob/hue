@@ -264,6 +264,8 @@ sub run_schedule_check() {
 			my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
 			my $sun_val = 0;
 			my $bri_adjust = 0;
+			my $sat_adjust = 0;
+			my $hue_adjust = 0;
 			my $adjust = 0;
 		
 			if ($sun == 1) {
@@ -271,6 +273,9 @@ sub run_schedule_check() {
 				$sun_val = get_suncycle($stamp);
 				# recalculate the adjustment, using the returned % and the configured base value value
 				$bri_adjust += int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+				# adjust huei/sat to warmer tones during darkness, but only a littlebit
+				$hue_adjust += int($config{'config'}{'adjust'}{'hue'} * ($sun_val / 200));
+				$sat_adjust += int($config{'config'}{'adjust'}{'sat'} * ($sun_val / 200));
 			}	
 
 			# only adjust for weather every 10 minutes AND between sunrise and sunset, put most significant first
@@ -286,6 +291,8 @@ sub run_schedule_check() {
 
 			# finalize brightness
 			$bri += $bri_adjust;
+			$sat += $sat_adjust;
+			$hue += $hue_adjust;
 
 			# get current values
 			my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
@@ -300,11 +307,13 @@ sub run_schedule_check() {
 					($cur_hue != $lights{'previous'}{$light}{'hue'}) or
 					($cur_onoff eq 'false')) {
 					$adjust = 0;
+				# if all is the same, no adjustment call is required	
 				} elsif (($cur_bri == $lights{'previous'}{$light}{'brightness'}) and
 					($cur_sat == $lights{'previous'}{$light}{'saturation'}) and
 					($cur_hue == $lights{'previous'}{$light}{'hue'}) and
 					($cur_onoff eq 'true')) {
 					$adjust = 2;
+				# change it.	
 				} else {
 					$adjust = 1;
 				}	
