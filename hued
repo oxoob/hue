@@ -622,23 +622,22 @@ sub printt($) {
 # unbuffered output
 $| = 1;
 
-# set_STDERR("hued.log");
+set_STDERR("hued.log");
 # daemonize this MF! (from the Perl Cookbook)
 # fork
-
-### $pid = fork;
+$pid = fork;
 # exit parent
-### exit if $pid;
+exit if $pid;
 # check
-### die "Couldn't fork $!\n" unless defined($pid);
+die "Couldn't fork $!\n" unless defined($pid);
 # diassociate from controlling terminal..
-### POSIX:setsid() or die "Can't start a new session $!\n";
+POSIX:setsid() or die "Can't start a new session $!\n";
 
 printt ("hued started - using PID: $$\n");
 
-### set_STDOUT($config{'config'}{'logging'}{'hue_log'});
+set_STDOUT($config{'config'}{'logging'}{'hue_log'});
 print "\n";
-### printt ("hued started - using PID: $$\n");
+printt ("hued started - using PID: $$\n");
 # catch signals
 $SIG{INT} = $SIG{TERM} = \&signal_term;
 $SIG{HUP} = \&signal_hup;
@@ -711,3 +710,6 @@ while ($i_should_run) {
 
 printt ("hued ended succesfully, PID: $$\n");
 exit 0;
+
+
+# bye now
