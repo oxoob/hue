@@ -20,9 +20,9 @@ my $clouds; # global var for storing cloudiness (so it does not have to be check
 # daemon control variables
 my $i_should_run;
 my $i_should_rerun;
-my $i_should_dump_config;
 my $i_should_reload_config;
 my $i_caught_a_signal;
+my $override = 1; # when the daemon starts, reruns, make the daemon set the lights, no matter what
 my $last_minute = 99; # initialize to an impossible value 
 my $pid;
 my $child_pid;
@@ -111,7 +111,7 @@ sub in($$) {
 	return 0;
 }	
 
-# convert HH:MM to seconds; :SS is ignored, which means it's rounded to the minute
+# convert HH:MM to minutes; :SS is ignored, which means it's rounded to the minute
 sub mins($) {
 	my $hhmm = shift;
 	my ($hh,$mm,$ss) = split (":", $hhmm);
@@ -303,7 +303,7 @@ sub run_schedule_check() {
 			printt ("    current    : $cur_bri/$cur_sat/$cur_hue\n");
 
 			# reset needed?
-			if ($rst) {
+			if ($rst or $override) {
 				$adjust = 2;
 
 			# verify if this is a first run or not.
@@ -571,26 +571,26 @@ sub mail_info($$) {
 # SIGNAL handlers
 sub signal_term {
 	printt ("### Caught TERM / INT \n");
-      	$i_should_run=0;
+      	$i_should_run = 0;
 	mail_info("hued: ended","PID: $$")
 }
 
 sub signal_hup {
 	printt ("### Caught HUP - reloading config \n");
-	$i_should_reload_config=1;
-	$i_caught_a_signal=1;
+	$i_should_reload_config = 1;
+	$i_caught_a_signal = 1;
 }
 
 sub signal_usr1 {
-	printt ("### Caught USR1 - dumping current config\n");
-	$i_should_dump_config=1;
-	$i_caught_a_signal=1;
+	printt ("### Caught USR1 - enforcing light settings\n");
+	$i_caught_a_signal = 1;
+	$override = 1;
 } 
 
 sub signal_usr2 {
 	printt ("### Caught USR2 - restart\n");
-	$i_should_dump_config=1;
-       	$i_should_rerun=1;
+       	$i_should_rerun = 1;
+	$override = 1;
 }
 
 # loads config, but empties it first
@@ -606,20 +606,6 @@ sub load_config() {
 	open_hue_file("hue.conf");
 }	
 	
-# dump some config variables	
-sub dump_config() {
-	# or at least part of it.
-	print "\nCurrently loaded data:";
-	print "\n\n";
-	print "output to                : $config{'config'}{'logging'}{'hue_log'}\n";
-	print "state                    : $config{'config'}{'logging'}{'hue_state'}\n";
-	print "log file size            : $config{'config'}{'logging'}{'hue_log_size'}\n";
-	print "clean time               : $config{'config'}{'logging'}{'hue_clean_time'}\n";
-	print "hue host                 : $config{'config'}{'hue'}{'hue_host'}\n";
-	print "hue user                 : $config{'config'}{'hue'}{'hue_user'}\n";
-	print "current pid              : $$\n";
-}
-
 # output redirection
 sub set_STDOUT($) {
 	my $outfile = shift;
@@ -686,13 +672,12 @@ $clouds = get_cloudiness();
 
 $i_should_run=1;
 $i_should_rerun=0;
-$i_should_dump_config=0;
 $i_should_reload_config=0;
 $i_caught_a_signal=0;
 
 while ($i_should_run) {
 	# wait 10 seconds -> run_schedule_check every 10 seconds.
-	# this implies that an extra check is required to prevent
+	# later on the minute is checked to prevent
 	# running multiple times during the same minute.
 	select (undef,undef,undef,10);
 
@@ -716,9 +701,6 @@ while ($i_should_run) {
 	}	
 
 	# now handle all other stuff that needs to be taken care of
-	if ($i_should_dump_config) {
-		dump_config();
-	}
 	if ($i_should_reload_config) {
 		load_config();
 		calculate_suncycle(\%suncycle);
@@ -726,7 +708,6 @@ while ($i_should_run) {
 		# initialize_current_light_values();
 	}
 	
-	$i_should_dump_config=0;
 	$i_should_reload_config=0;
 	$i_caught_a_signal=0;
 
@@ -738,6 +719,7 @@ while ($i_should_run) {
 		$i_should_rerun=0;
 		exit if ($newpid);
 	}	
+	$override = 0;
 }
 
 
