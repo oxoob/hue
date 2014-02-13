@@ -17,10 +17,6 @@ my $pause;
 my $hue;
 my $clouds; # global var for storing cloudiness (so it does not have to be checked all the time)
 
-my $start_time;
-my $end_time;
-my $run_time;
-
 # daemon control variables
 my $i_should_run;
 my $i_should_rerun;
@@ -629,12 +625,14 @@ sub set_STDOUT($) {
 	my $outfile = shift;
 	open(FOUT, ">>$outfile") || die "\nCouldn't open logfile\n";
 	*STDOUT = *FOUT;	
+	$| = 1;
 }
 
 sub set_STDERR($) {
 	my $outfile = shift;
 	open(FERR, ">>$outfile") || die "\nCouldn't open logfile\n";
         *STDERR = *FERR;
+	$| = 1;
 }
 
 # print with a timestamp
