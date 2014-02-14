@@ -1,5 +1,13 @@
 #!/usr/bin/perl -w 
 
+# hued, 2014
+# a daemon to control a bunch of philips hue lights throughout the day
+# License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
+# https://github.com/oxoob/hue
+
+# TODO: check if another daemon is already running
+# TODO: 
+
 # use clauses
 use strict;
 use POSIX;
@@ -203,9 +211,8 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 					}	
-					# trigger reset at start and end of period
+					# trigger reset at start of period
 					$lights{'schedules'}{$light}{$ss}{'reset'} = 1;
-					$lights{'schedules'}{$light}{$se}{'reset'} = 1;
 				}	
 			} else {	
 				foreach my $light (@on_lights) {
@@ -225,9 +232,8 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 					}	
-					# trigger reset at start and end of period
+					# trigger reset at start of period
 					$lights{'schedules'}{$light}{$ss}{'reset'} = 1;
-					$lights{'schedules'}{$light}{$se}{'reset'} = 1;
 				}
 			}	
 		}	
@@ -260,7 +266,7 @@ sub run_schedule_check() {
 
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		if ($lights{'schedules'}{$light}{$stamp}{'brightness'} > 0) {
-			printt ("light: $light ($config{'lights_defaults'}{$light}{'name'})\n");
+			printt (" $light ($config{'lights_defaults'}{$light}{'name'})\n");
 			my $bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
 			my $sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
 			my $hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
@@ -288,19 +294,19 @@ sub run_schedule_check() {
 			if ($wth == 1) {
 				# recalculate the adjustment, using the returned % and the configured base value value
 				# also adjust for the sun, as the sun_adjust gets higher, the effect of the weather adjustment should get lower
-				$bri_adjust += int($config{'config'}{'adjust'}{'clouds'} * ((100 - $sun_val) * $clouds / 10000)); # 2 percentages, hence the divide by 10000
+				$bri_adjust += int($config{'config'}{'adjust'}{'clouds'} * ((100 - $sun_val) * $clouds / 10000)); # 2 percentages, hence the division by 10000
 			}	
 
-			printt ("    base       : $bri/$sat/$hue/$sun/$wth/$rst\n");
+			printt (" $light   base        : $bri/$sat/$hue/$sun/$wth/$rst\n");
 			# finalize brightness/saturation/hue
 			$bri += $bri_adjust;
 			$sat += $sat_adjust;
 			$hue += $hue_adjust;
-			printt ("    adjustments: $bri_adjust/$sat_adjust/$hue_adjust\n");
+			printt (" $light   adjustments : $bri_adjust/$sat_adjust/$hue_adjust\n");
 
 			# get current values
 			my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
-			printt ("    current    : $cur_bri/$cur_sat/$cur_hue\n");
+			printt (" $light   current     : $cur_bri/$cur_sat/$cur_hue/on:$cur_onoff\n");
 
 			# reset needed?
 			if ($rst or $override) {
@@ -339,11 +345,12 @@ sub run_schedule_check() {
 
 			if ($adjust == 2) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				printt ("    adjusted to: $bri/$sat/$hue\n");
+				printt (" $light   ** adjusted to: $bri/$sat/$hue\n");
 			} elsif ($adjust == 1) {	
-				printt ("    **  remains the same\n");
+				printt (" $light   ** remains the same\n");
 			} elsif ($adjust == 0) {	
-				printt ("    **  was not adjusted (altered externally)\n");
+				printt (" $light   ** was not adjusted (altered externally)\n");
+				$lights{'previous'}{$light}{'altered'} = 'yes';
 			}	
 			# store the current values as previous
 			$lights{'previous'}{$light}{'brightness'} = $bri;
@@ -351,8 +358,21 @@ sub run_schedule_check() {
 			$lights{'previous'}{$light}{'hue'} = $hue;
 
 		} else {
-			# turn it off
-			light_adjust($light,'false',0,0,0);
+			printt (" $light ($config{'lights_defaults'}{$light}{'name'})\n");
+
+			# get current values
+			my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
+			printt (" $light   current     : $cur_bri/$cur_sat/$cur_hue/on:$cur_onoff\n");
+
+			# turn it off, unless it was in an altered state
+			if (exists($lights{'previous'}{$light}{'altered'}) and ($lights{'previous'}{$light}{'altered'} eq 'yes')) {
+				printt (" $light   ** not turned off (altered externally)\n");
+			} elsif ($cur_onoff eq 'true') {	
+				light_adjust($light,'false',0,0,0);
+				printt (" $light   ** off\n");
+			} else {	
+				printt (" $light   ** remains off\n");
+			}	
 		}
 	}
 }
