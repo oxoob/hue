@@ -63,6 +63,7 @@ sub open_hue_file($) {
 			}	
 			if ($line =~ /^\s*(\S+)\s*=\s*(.*)\s*$/) {
 				$config{$key_A}{$key_B}{$1} = $2;
+				$config{$key_A}{$key_B}{$1} =~ s/\s+$//g; # strip whitespace at the end
 				# print ("Added to config : $key_A - $key_B -> $1 => $2\n");
 			}
 		}
@@ -82,7 +83,7 @@ sub calculate_suncycle($) {
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
 	my $length  = int(5 + 50 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
-	printt("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
+	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
 
 	# night
 	for (my $minute = 0; $minute < int($sunrise - $length/2); $minute++) {
@@ -147,7 +148,7 @@ sub calculate_default_schedules() {
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
-	printt("Calculating schedules:\n");
+	printt ("Calculating schedules:\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
@@ -199,7 +200,7 @@ sub calculate_default_schedules() {
 				$wth_adjust = 1;
 			}
 
-			printt("    $schedule => start $ss ($config{'schedule'}{$schedule}{'start_time'}), end $se ($config{'schedule'}{$schedule}{'end_time'}), bri+/-: $bri_adjust, sat+/-: $sat_adjust, hue+/-: $hue_adjust, sun: $sun_adjust, weather: $wth_adjust\n");
+			printt ("    $schedule => start $ss ($config{'schedule'}{$schedule}{'start_time'}), end $se ($config{'schedule'}{$schedule}{'end_time'}), bri+/-: $bri_adjust, sat+/-: $sat_adjust, hue+/-: $hue_adjust, sun: $sun_adjust, weather: $wth_adjust\n");
 			# normally end is bigger (later) than start
 			# if not (-> else) assume it crosses midnight and then it needs to be split up
 			if ($se > $ss) {
@@ -413,10 +414,10 @@ sub light_adjust($$$$$) {
 	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
 	# to get a match on success. TODO
 	if ($curl_returncode == 0 and $curl_output =~ /success/) {
-		# printt("  a+ light $light adjusted\n");
+		# printt ("  a+ light $light adjusted\n");
 		return 1;
 	} else {	
-		# printt("  a- light $light not adjusted\n");
+		# printt ("  a- light $light not adjusted\n");
 		return 0;
 	}	
 }	
@@ -462,7 +463,7 @@ sub get_suncycle($) {
 }
 
 # dummy for testing
-sub get_cloudiness() {
+sub get_cloudiness_testing() {
 	my $clouds = 33;
 	open(CL,"<clouds") or die ("$? - $!");
 	while (<CL>) {
@@ -471,24 +472,23 @@ sub get_cloudiness() {
 		}	
 	}
 	close(CL);
-	printt("clouds: $clouds\n");			
+	printt ("clouds: $clouds\n");			
 	return $clouds;
 }	
 	
 
 # does something with weather, returns clouds value (0-100) 
-sub get_cloudiness_real() {
-	my $return_value = 50; # default is somewhere in the middle
+sub get_cloudiness() {
+	my $return_value = 10; # arbitrary default to 10
 	my $longitude = $config{'config'}{'location'}{'long'};
 	my $latitude  = $config{'config'}{'location'}{'lat'};
 	my $open_weather_map_url = "http://api.openweathermap.org/data/2.5/weather?mode=json&units=metric&lat=$latitude&lon=$longitude";
 	my $curl_command = "$curl -s -f -X GET -H 'Content-Type: application/json' '$open_weather_map_url'";
 	my $curl_output;
 	my $curl_returncode;
-	my $clouds = 50; # 100 = heavy overcast, 0 = clear sky
-
+	my $clouds = -1; # 100 = heavy overcast, 0 = clear sky, -1 = no value
+	
 	# setup a curl session to openweathermap
-	# printt ("curl    : $curl_command\n");
 	if ($child_pid = open (CO,"-|","$curl_command")) {
 		alarm($timeout);
 		while (<CO>) {
@@ -498,16 +498,21 @@ sub get_cloudiness_real() {
 		$curl_returncode = $?;
 		alarm(0);
 	}
+
+	# printt (" -- cloudscurl : $curl_command\n");
+	# printt (" -- cloudsoutput : $curl_output\n");
+
 	if ($curl_returncode == 0) {
 		# ok
-		$clouds = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
-		$return_value = $clouds;
-		printt(" -- clouds   : $clouds\n");			
+		($clouds) = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
+		if ($clouds != -1) {
+			$return_value = $clouds;
+		}	
+		printt (" -- clouds : $return_value\n");			
 	} else {
 		# curl not ok
-		printt(" !! curl to $open_weather_map_url failed\n");
+		printt (" !! curl to $open_weather_map_url failed\n");
 	}	
-
 	return $return_value;
 }
 
@@ -554,7 +559,7 @@ sub self_clean() {
 					print SF "$ts";
 					close SF;
 				} else {
-					printt("State File NOT updated\n");
+					printt ("State File NOT updated\n");
 				}	
 			} else {
 				printt ("Log file copy not ok\n");
@@ -707,8 +712,10 @@ while ($i_should_run) {
 	# run_schedule_check every minute, but only once a minute
 	# that means only trigger when the minute has changed
 	if ($now_minute != $last_minute) {
-		# update clouds value
-		$clouds = get_cloudiness();
+		# every 10 minutes, update clouds value
+		if ($now_minute % 10 == 3) {
+			$clouds = get_cloudiness();
+		}	
 		run_schedule_check();
 
 		# at 0:00 in the morning, do selfcleaning, and calculate the suncycle and schedules for the day
