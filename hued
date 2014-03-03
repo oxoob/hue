@@ -234,6 +234,7 @@ sub calculate_default_schedules() {
 			$lights{'schedules'}{$light}{$stamp}{'hue'}          = -1; # $config{'lights_defaults'}{$light}{'hue'};
 			$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = 0;
 			$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = 0;
+			$lights{'schedules'}{$light}{$stamp}{'on'}           = 0;
 		}	
 	}	
 
@@ -289,9 +290,10 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'on'} = 1;
 					}	
 					# trigger reset at start of period
-					$lights{'schedules'}{$light}{$ss}{'reset'} = 1;
+					$lights{'schedules'}{$light}{$ss}{'on'} = 2;
 				}	
 			} else {	
 				foreach my $light (@on_lights) {
@@ -302,6 +304,7 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'on'} = 1;
 					}	
 					# post-midnight
 					for (my $stamp = 0; $stamp <= $se; $stamp++) {
@@ -310,9 +313,10 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
+						$lights{'schedules'}{$light}{$stamp}{'on'} = 1;
 					}	
 					# trigger reset at start of period
-					$lights{'schedules'}{$light}{$ss}{'reset'} = 1;
+					$lights{'schedules'}{$light}{$ss}{'on'} = 2;
 				}
 			}	
 		}	
@@ -382,6 +386,7 @@ sub calculate_default_schedules() {
 				# keep adjusting for sun and weather during the smoothing period (if not set already)
 				$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust; 
 				$lights{'schedules'}{$light}{$stamp}{'use_weather'} = $wth_adjust; 
+				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
 				# increase counter
 				$bri_count++;
 				# end the loop, set back to 0, if enough has been done
@@ -394,6 +399,7 @@ sub calculate_default_schedules() {
 				$lights{'schedules'}{$light}{$stamp}{'sat_smooth'} = $smooth * posneg($sat_diff);
 				$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust; 
 				$lights{'schedules'}{$light}{$stamp}{'use_weather'} = $wth_adjust; 
+				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
 				$sat_count++;
 				$sat_count = 0 if ($sat_count > $smoothing_time); 
 			}	
@@ -404,27 +410,12 @@ sub calculate_default_schedules() {
 				$lights{'schedules'}{$light}{$stamp}{'hue_smooth'} = $smooth * posneg($hue_diff);
 				$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust; 
 				$lights{'schedules'}{$light}{$stamp}{'use_weather'} = $wth_adjust; 
+				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
 				$hue_count++;
 				$hue_count = 0 if ($hue_count > $smoothing_time); 
 			}	
 		}
 	}	
-}
-
-sub dump_default_schedules() {
-	my $output .= '';
-	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
-		$output .= "DUMPING SCHEDULE $light: ";
-		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
-			$output .= $lights{'schedules'}{$light}{$stamp}{'brightness'} . ",";
-			# $lights{'schedules'}{$light}{$stamp}{'saturation'};
-			# $lights{'schedules'}{$light}{$stamp}{'hue'};
-			# $lights{'schedules'}{$light}{$stamp}{'use_suncycle'};
-			# $lights{'schedules'}{$light}{$stamp}{'use_weather'};
-		}	
-		$output .= "\n";
-	}	
-	print $output;
 }
 
 # run_schedule_check; this run_schedule_checks on the timer and does matching and processing
@@ -437,15 +428,19 @@ sub run_schedule_check() {
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
-		if ($lights{'schedules'}{$light}{$stamp}{'brightness'} > 0) {
-			my $name = $config{'lights_defaults'}{$light}{'name'};
-			my $bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
-			my $sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
-			my $hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
-			my $sun = $lights{'schedules'}{$light}{$stamp}{'use_suncycle'};
-			my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
-			my $reset      = 0; 
-			my $smoothing  = 0; 
+		my $name = $config{'lights_defaults'}{$light}{'name'};
+		my $on  = $lights{'schedules'}{$light}{$stamp}{'on'};
+		my $bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
+		my $sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
+		my $hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
+		my $sun = $lights{'schedules'}{$light}{$stamp}{'use_suncycle'};
+		my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
+		# $on -> 0 = off
+		#     -> 1 = on
+		#     -> 2 = reset
+		#     -> 3 = smooth
+		printt (" $light ($name)\n");
+		if ($on) {
 			my $sun_val    = 0;
 			my $bri_adjust = 0;
 			my $sat_adjust = 0;
@@ -453,16 +448,10 @@ sub run_schedule_check() {
 			my $bri_smooth = 100; # initialize to 100 %
 			my $sat_smooth = 100;
 			my $hue_smooth = 100;
-			my $adjust = 1; # adjust could be just 0 or 1, but the value is used to identify the descision in the  output
-			printt (" $light ($name)\n");
 			log_to_database('lights',$db_stamp, {'primary_key'=>"$db_stamp $light", 'light'=>$light, 'base_bri'=>$bri, 'base_sat'=>$sat, 'base_hue'=>$hue});
 
-			$reset = 1 if (exists($lights{'schedules'}{$light}{$stamp}{'reset'}) and ($lights{'schedules'}{$light}{$stamp}{'reset'} == 1));
-			# smoothing is activated if any of these values are set
-			if (exists($lights{'schedules'}{$light}{$stamp}{'bri_smooth'}) or 
-			    exists($lights{'schedules'}{$light}{$stamp}{'sat_smooth'}) or
-			    exists($lights{'schedules'}{$light}{$stamp}{'hue_smooth'})) {
-				$smoothing = 1;
+			# smoothing is activated if is $on = 3, therefore set the values
+			if ($on == 3) {
 				$bri_smooth = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
 				$sat_smooth = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
 				$hue_smooth = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
@@ -483,12 +472,17 @@ sub run_schedule_check() {
 				$bri_adjust += int($config{'config'}{'adjust'}{'clouds'} * ((100 - $sun_val) * $clouds / 10000)); # 2 percentages, hence the division by 10000
 			}	
 			printt (" LIGHT$light   adjustments : $bri_adjust/$sat_adjust/$hue_adjust\n");
+			printt (" LIGHT$light   base        : $bri/$sat/$hue/$sun/$wth/$on\n");
 
-			printt (" LIGHT$light   base        : $bri/$sat/$hue/$sun/$wth/$reset\n");
 			# finalize brightness/saturation/hue, also include smoothing
 			$bri += int($bri_adjust * abs($bri_smooth/100));
 			$sat += int($sat_adjust * abs($sat_smooth/100));
 			$hue += int($hue_adjust * abs($hue_smooth/100));
+			# make sure these don't go out of range
+			minmax(\$bri,0,254);
+			minmax(\$sat,0,254);
+			minmax(\$hue,0,65535);
+
 			printt (" LIGHT$light   adj & smthd : $bri/$sat/$hue\n");
 
 			# get current values
@@ -503,50 +497,35 @@ sub run_schedule_check() {
 			# - in other cases                      -> no change
 			# for logging purposes the adjust value is also used to reflect what kind of action was taken, 
 
-			# reset needed?
-			if ($reset or $override) {
-				$adjust = 3;
+			# reset or override needed?
+			if (($on == 2) or $override) {
+				light_adjust($light,'true',$bri,$sat,$hue);
 				$lights{'previous'}{$light}{'altered'} = 'no';
+				printt (" LIGHT$light   ** adjusted to: $bri/$sat/$hue\n");
+				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
 			
 			# verify if this is a first run or not.
 			} elsif (not exists($lights{'previous'}{$light}{'brightness'})) {
-				$adjust = 2;
+				printt (" LIGHT$light   ** remains the same (initial value)\n");
 			
 			# if one or more values is not the same as the previous value, it was probably modified, leave it alone
 			} elsif (($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
 				($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
 				($cur_hue != $lights{'previous'}{$light}{'hue'}) or
 				($cur_onoff eq 'false')) {
-				$adjust = 0;
+
+				$lights{'previous'}{$light}{'altered'} = 'yes';
+				printt (" LIGHT$light   ** was not adjusted (altered externally)\n");
 				
 			# smoothing needed?
-			} elsif ($smoothing) {
-				$adjust = 4;
-			}	
-
-			# make sure these don't go out of range
-			minmax(\$bri,0,254);
-			minmax(\$sat,0,254);
-			minmax(\$hue,0,65535);
-
-			# do the work. 
-			if ($adjust == 0) {	
-				printt (" LIGHT$light   ** was not adjusted (altered externally)\n");
-				$lights{'previous'}{$light}{'altered'} = 'yes';
-			} elsif ($adjust == 1) {	
-				printt (" LIGHT$light   ** remains the same\n");
-			} elsif ($adjust == 2) {	
-				printt (" LIGHT$light   ** remains the same (initial value)\n");
-			} elsif ($adjust == 3) {
-				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
+			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				printt (" LIGHT$light   ** adjusted to: $bri/$sat/$hue\n");
 				$lights{'previous'}{$light}{'altered'} = 'no';
-			} elsif ($adjust == 4) {	
-				light_adjust($light,'true',$bri,$sat,$hue);
 				printt (" LIGHT$light   ** smoothing to: $bri/$sat/$hue\n");
-				$lights{'previous'}{$light}{'altered'} = 'no';
+			} else {	
+				printt (" LIGHT$light   ** remains the same\n");
 			}	
+
 			log_to_database('lights',$db_stamp, {'primary_key'=>"$db_stamp $light", 'light'=>$light, 'current_bri'=>$bri, 'current_sat'=>$sat, 'current_hue'=>$hue});
 
 			# store the current values as previous
@@ -555,8 +534,6 @@ sub run_schedule_check() {
 			$lights{'previous'}{$light}{'hue'} = $hue;
 
 		} else {
-			printt (" $light ($config{'lights_defaults'}{$light}{'name'})\n");
-
 			# get current values
 			my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
 			printt (" LIGHT$light   current     : $cur_bri/$cur_sat/$cur_hue/on:$cur_onoff\n");
@@ -572,7 +549,7 @@ sub run_schedule_check() {
 				printt (" LIGHT$light   ** remains off\n");
 			}	
 			
-			# prevent the daemon from turning off a light, that was adjusted
+			# prevent the daemon from turning off a light that was adjusted
 			if (exists($lights{'previous'}{$light}{'brightness'}) and 
 				(($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
 				 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
@@ -676,6 +653,9 @@ sub get_suncycle($) {
 # dummy for testing
 sub get_cloudiness_testing() {
 	my $clouds = 33;
+	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+	my $db_stamp = sprintf("%04d-%02d-%02d %02d:%02d:%02d",$now_year + 1900, $now_month + 1, $now_day, $now_hour, $now_minute, $now_second);
+
 	open(CL,"<clouds") or die ("$? - $!");
 	while (<CL>) {
 		if ($_ =~ /clouds:\s*(\d+)/) {
@@ -683,7 +663,10 @@ sub get_cloudiness_testing() {
 		}	
 	}
 	close(CL);
+
 	printt ("clouds: $clouds\n");			
+	log_to_database('weather',"$db_stamp",{'percentage'=>$clouds});
+
 	return $clouds;
 }	
 	
@@ -837,40 +820,17 @@ sub mail_info($$) {
 }
 
 # push me some stuff
-sub push_dot_co($) {
-        my $message = shift;
-	my $url    = $config{'config'}{'push.co'}{'url'};
-	my $key    = $config{'config'}{'push.co'}{'key'};
-	my $secret = $config{'config'}{'push.co'}{'secret'};
-	my $curl_output  = "";
-	my $curl_RC      = 1;
-	my $curl_command; 
-	
-	$curl_command = "$curl -s -f -X POST -d 'message=$message' -d 'api_key=$key' -d 'api_secret=$secret' $url";
-	# printt ("curl    : $curl_command\n");
-	
-	if ($child_pid = open (CO,"-|","$curl_command")) {
-		alarm($timeout);
-		while (<CO>) {
-			$curl_output .= $_;	
-		}
-		close(CO);
-		$curl_RC = $?;
-		alarm(0);
-	}
-	# printt ("   - curl RC : $curl_RC\n");
-	# printt ("  x- curl out: $curl_output\n");
-	return ($curl_RC, $curl_output);
-}	
-
-# push me some stuff
 sub pushover($$$) {
+	# if notifications are off, bail out now.
+	if ($config{'config'}{'pushover'}{'notify'} eq "no") {
+		return 0;
+	}	
 	my $title   = shift;
         my $message = shift;
 	my $prio    = shift;
-	my $url    = $config{'config'}{'pushover'}{'url'};
-	my $token  = $config{'config'}{'pushover'}{'token'};
-	my $user   = $config{'config'}{'pushover'}{'user'};
+	my $url     = $config{'config'}{'pushover'}{'url'};
+	my $token   = $config{'config'}{'pushover'}{'token'};
+	my $user    = $config{'config'}{'pushover'}{'user'};
 	my $curl_output  = "";
 	my $curl_RC      = 1;
 	my $curl_command; 
@@ -998,7 +958,6 @@ if (not connect_database()) {
 calculate_suncycle(\%suncycle);
 calculate_default_schedules();
 dump_suncycle_to_database(\%suncycle);
-# dump_default_schedules();
 $clouds = get_cloudiness();
 
 $i_should_run=1;
@@ -1032,7 +991,6 @@ while ($i_should_run) {
 			calculate_suncycle(\%suncycle);
 			calculate_default_schedules();
 			# dump_suncycle_to_database(\%suncycle);
-			# dump_default_schedules();
 		}	
 		$last_minute = $now_minute;
 		# reset override
