@@ -388,6 +388,7 @@ sub calculate_default_schedules() {
 					# which then results in a state where the light is no longer under control of the daemon
 					# due to that it is identified as modified externally.
 					$lights{'schedules'}{$light}{$stamp + 1}{'on'} = 3;
+					$lights{'schedules'}{$light}{$stamp + 1}{'bri_smooth'} = 0;
 				}	
 			}	
 			if ($sat_count > 0) {
@@ -402,6 +403,7 @@ sub calculate_default_schedules() {
 				if ($sat_count > $smoothing_time) {
 					$sat_count = 0;
 					$lights{'schedules'}{$light}{$stamp + 1}{'on'} = 3;
+					$lights{'schedules'}{$light}{$stamp + 1}{'sat_smooth'} = 0;
 				}	
 			}	
 			if ($hue_count > 0) {
@@ -416,6 +418,7 @@ sub calculate_default_schedules() {
 				if ($hue_count > $smoothing_time) {
 					$hue_count = 0;
 					$lights{'schedules'}{$light}{$stamp + 1}{'on'} = 3;
+					$lights{'schedules'}{$light}{$stamp + 1}{'hue_smooth'} = 0;
 				}	
 			}	
 		}
@@ -515,14 +518,15 @@ sub run_schedule_check() {
 			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				$lights{'previous'}{$light}{'altered'} = 'no';
-				printt (" LIGHT$light ($name) smoothin from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
+				printt (" LIGHT$light ($name) smoothing from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
 			} else {	
 				printt (" LIGHT$light ($name) remains the same\n");
+				$lights{'previous'}{$light}{'altered'} = 'no';
 			}	
 
 			log_to_database('lights',$db_stamp, {	'primary_key'=>"$db_stamp $light", 'light'=>$light, 
 								'set_bri'=>$bri, 'set_sat'=>$sat, 'set_hue'=>$hue, 
-								'current_bri'=>$bri, 'current_sat'=>$sat, 'current_hue'=>$hue});
+								'current_bri'=>$cur_bri, 'current_sat'=>$cur_sat, 'current_hue'=>$cur_hue});
 
 			# store the current values as previous
 			$lights{'previous'}{$light}{'brightness'} = $bri;
