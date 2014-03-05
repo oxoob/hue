@@ -5,7 +5,9 @@
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
 
-# TODO: check if another daemon is already running
+# BIG TODO: incorporate the suncycle into the schedule calculation, before smoothing.
+# 2ND TODO: consider splitting up the calculation function.
+# POSTPONED TODO: check if another daemon is already running
 
 # use clauses
 use strict;
@@ -14,8 +16,9 @@ use File::stat;
 use File::Copy;
 use DateTime;
 use Astro::Sunrise;
-use Data::Dumper;
 use DBI;
+use Data::Dumper;
+$Data::Dumper::Sortkeys = sub {[sort {$a <=> $b} keys %{$_[0]}]};
 
 # global variables
 my %config;
@@ -458,7 +461,6 @@ sub run_schedule_check() {
 		#     -> 3 = smooth
 		# printt (" $light ($name)\n");
 		if ($on) {
-
 			# smoothing is activated if is $on = 3, therefore set the values
 			if ($on == 3) {
 				$bri_smooth = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
@@ -512,7 +514,7 @@ sub run_schedule_check() {
 				($cur_onoff eq 'false')) {
 
 				$lights{'previous'}{$light}{'altered'} = 'yes';
-				printt (" LIGHT$light ($name) was not adjusted (altered externally)\n");
+				printt (" LIGHT$light ($name) was not adjusted (altered externally, current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 				
 			# smoothing needed?
 			} elsif ($on == 3) {
@@ -1005,6 +1007,7 @@ if (not connect_database()) {
 
 calculate_suncycle(\%suncycle);
 calculate_default_schedules();
+## print Dumper(\%{$lights{'schedules'}{1}});
 dump_suncycle_to_database(\%suncycle);
 $clouds = get_cloudiness();
 
