@@ -5,20 +5,20 @@
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
 
-# BIG TODO: incorporate the suncycle into the schedule calculation, before smoothing.
-# 2ND TODO: consider splitting up the calculation function.
-# POSTPONED TODO: check if another daemon is already running
+# TODO: check if another daemon is already running
 
 # use clauses
 use strict;
 use POSIX;
 use File::stat;
 use File::Copy;
+use Math::Round;
 use DateTime;
 use Astro::Sunrise;
 use DBI;
 use Data::Dumper;
 $Data::Dumper::Sortkeys = sub {[sort {$a <=> $b} keys %{$_[0]}]};
+# $Data::Dumper::Sortkeys = 1; # sub {[sort {$a <=> $b} keys %{$_[0]}]};
 
 # global variables
 my %config;
@@ -226,16 +226,14 @@ sub by_start_time {
 sub calculate_default_schedules() {
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
-	my $smoothing_time = $config{'config'}{'adjust'}{'smoothing_time'};
 
 	printt ("Calculating schedules:\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
-			$lights{'schedules'}{$light}{$stamp}{'brightness'}   = -1;
-			$lights{'schedules'}{$light}{$stamp}{'saturation'}   = -1; # $config{'lights_defaults'}{$light}{'saturation'};
-			$lights{'schedules'}{$light}{$stamp}{'hue'}          = -1; # $config{'lights_defaults'}{$light}{'hue'};
-			$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = 0;
+			$lights{'schedules'}{$light}{$stamp}{'brightness'}   = 0;
+			$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'};
+			$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'};
 			$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = 0;
 			$lights{'schedules'}{$light}{$stamp}{'on'}           = 0;
 		}	
@@ -254,7 +252,7 @@ sub calculate_default_schedules() {
 			my $bri_adjust = 0;
 			my $sat_adjust = 0;
 			my $hue_adjust = 0;
-			my $sun_adjust = 0; 
+			my $sun_adjust = 0;
 			my $wth_adjust = 0; 
 			 
 			if (exists($config{'schedule'}{$schedule}{'brightness'})) {
@@ -284,12 +282,20 @@ sub calculate_default_schedules() {
 			if ($se > $ss) {
 				foreach my $light (@on_lights) {
 					for (my $stamp = $ss; $stamp <= $se; $stamp++) {
-						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
+						my $sun_add = 0;
+						my $on = 1;
+						if ($sun_adjust) {
+							# get the adjustement for sun cycle (%)
+							my $sun_val = get_suncycle($stamp);
+							# recalculate the adjustment, using the returned % and the configured base value value
+							$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
+						}	
+						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'on'} = 1;
+						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
 					# trigger reset at start of period
 					$lights{'schedules'}{$light}{$ss}{'on'} = 2;
@@ -298,21 +304,37 @@ sub calculate_default_schedules() {
 				foreach my $light (@on_lights) {
 					# pre-midnight
 					for (my $stamp = $ss; $stamp <= 1440; $stamp++) {
-						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
+						my $sun_add = 0;
+						my $on = 1;
+						if ($sun_adjust) {
+							# get the adjustement for sun cycle (%)
+							my $sun_val = get_suncycle($stamp);
+							# recalculate the adjustment, using the returned % and the configured base value value
+							$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
+						}	
+						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'on'} = 1;
+						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
 					# post-midnight
 					for (my $stamp = 0; $stamp <= $se; $stamp++) {
-						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
+						my $sun_add = 0;
+						my $on = 1;
+						if ($sun_adjust) {
+							# get the adjustement for sun cycle (%)
+							my $sun_val = get_suncycle($stamp);
+							# recalculate the adjustment, using the returned % and the configured base value value
+							$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
+						}	
+						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'on'} = 1;
+						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
 					# trigger reset at start of period
 					$lights{'schedules'}{$light}{$ss}{'on'} = 2;
@@ -320,109 +342,66 @@ sub calculate_default_schedules() {
 			}	
 		}	
 	}
+}
+
+# do the smoothing
+sub smooth_default_schedules() {
+	my $smoothing_time = $config{'config'}{'adjust'}{'smoothing_time'};
+
+	printt ("Smoothing schedules:\n");
+	# initialize a day worth of data for each light in defaults
+
 	# NOTE, W.I.P.: do a smoothing pass on the default schedule
 	# another NOTE: if a period f.i. ends at 23:50 and you set a smoothing time of 15 minutes; the last 5 minutes are not smoothed.
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
-		my $previous_bri = $lights{'schedules'}{$light}{0}{'brightness'}; # initialize to first value
-		my $previous_sat = $lights{'schedules'}{$light}{0}{'saturation'}; # initialize to first value
-		my $previous_hue = $lights{'schedules'}{$light}{0}{'hue'}; # initialize to first value
-		my $bri_diff     = 0;
-		my $sat_diff     = 0;
-		my $hue_diff     = 0;
-		my $bri_count    = 0;
-		my $sat_count    = 0;
-		my $hue_count    = 0;
-		my $sun_adjust   = 0;
-		my $wth_adjust   = 0;
 		# process a whole day
 		printt("Smoothing light $light\n");
+		my $type = 0; # debugging 2 methods
 		foreach my $stamp (0..1440) {
-			# FIRST: determine if a transistion in values is detected
-			# if the brightness does not match the previous, smoothing is in order.
-			if (($lights{'schedules'}{$light}{$stamp}{'brightness'} != $previous_bri) or
-				($lights{'schedules'}{$light}{$stamp}{'saturation'} != $previous_sat) or
-				($lights{'schedules'}{$light}{$stamp}{'hue'} != $previous_hue)) {
-				# only on the first step, calculate the difference
-				# also store wether adjustements for sun and weather are used
-				# and initialize the counters
-				if ($bri_count == 0) {
-					$bri_diff = $lights{'schedules'}{$light}{$stamp}{'brightness'} - $previous_bri;
-					$sun_adjust = 1 if ($lights{'schedules'}{$light}{$stamp - 1}{'use_suncycle'});
-					$wth_adjust = 1 if ($lights{'schedules'}{$light}{$stamp - 1}{'use_weather'});
-					$bri_count = 1;
+			# get a weighted (using a cosine curve) average for the current $stamp
+			my $bri_value    = 0;
+			my $bri_result   = 0;
+			my $sat_value    = 0;
+			my $sat_result   = 0;
+			my $hue_value    = 0;
+			my $hue_result   = 0;
+			my $weight_total = 0;
+			if ($type == 0) {
+				for (my $index = -int($smoothing_time/2); $index <= int($smoothing_time/2); $index++ ) {
+					my $weight = cos($index * 3.1415 / $smoothing_time);
+					$weight_total += $weight;
+					my $stamp_index = $stamp + $index;
+					minmax(\$stamp_index,0,1440);
+					$bri_value += $lights{'schedules'}{$light}{$stamp_index}{'brightness'} * $weight;
+					$sat_value += $lights{'schedules'}{$light}{$stamp_index}{'saturation'} * $weight;
+					$hue_value += $lights{'schedules'}{$light}{$stamp_index}{'hue'} * $weight;
+				}
+				$bri_result = round($bri_value/$weight_total);
+				$sat_result = round($sat_value/$weight_total);
+				$hue_result = round($hue_value/$weight_total);
+			} else {	
+				for (my $index = -4; $index <= 5; $index++) {
+					my $stamp_index = $stamp + $index;
+					minmax(\$stamp_index,0,1440);
+					$bri_value += $lights{'schedules'}{$light}{$stamp_index}{'brightness'};
+					$sat_value += $lights{'schedules'}{$light}{$stamp_index}{'saturation'};
+					$hue_value += $lights{'schedules'}{$light}{$stamp_index}{'hue'};
 				}	
-				if ($sat_count == 0) {
-					$sat_diff = $lights{'schedules'}{$light}{$stamp}{'saturation'} - $previous_sat;
-					$sat_count = 1;
-				}	
-				if ($hue_count == 0) {
-					$hue_diff = $lights{'schedules'}{$light}{$stamp}{'hue'} - $previous_hue;
-					$hue_count = 1;
-				}	
-			}
-			# store current as previous
-			$previous_bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
-			$previous_sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
-			$previous_hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
-
-			# SECOND: calculate smoothed values
-			# smoothing is done in smoothing_time stamps (minutes)
-			# calculate bri, sat an hue smoothing separately, in theory, these could be out of sync in time, 
-			# but more obviously require different upward or downward corrections
-			if ($bri_count > 0) {
-				# new value, smoothing uses a cosine in steps
-				my $smooth = int(cos($bri_count * 3.1415 / $smoothing_time) * 50 + 50);
-				my $value  = $lights{'schedules'}{$light}{$stamp}{'brightness'} - int(($smooth * $bri_diff) / 100);
-
-				$lights{'schedules'}{$light}{$stamp}{'brightness'} = $value;
-				# also store the smoothing % 
-				$lights{'schedules'}{$light}{$stamp}{'bri_smooth'} = $smooth * posneg($bri_diff);
-				# keep adjusting for sun and weather during the smoothing period (if not set already)
-				$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust; 
-				$lights{'schedules'}{$light}{$stamp}{'use_weather'} = $wth_adjust; 
-				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
-				# increase counter
-				$bri_count++;
-				# end the loop, set back to 0, if enough has been done
-				if ($bri_count > $smoothing_time) {
-					$bri_count = 0;
-					# make sure the next value (beyond the last is included in the smoothing
-					# reason: it happens that the last smooting value lands on f.i. 1 i.s.o. 0 (due to rounding)
-					# which then results in a state where the light is no longer under control of the daemon
-					# due to that it is identified as modified externally.
-					$lights{'schedules'}{$light}{$stamp + 1}{'on'} = 3;
-					$lights{'schedules'}{$light}{$stamp + 1}{'bri_smooth'} = 0;
-				}	
+				$bri_result = round($bri_value/10);
+				$sat_result = round($sat_value/10);
+				$hue_result = round($hue_value/10);
 			}	
-			if ($sat_count > 0) {
-				my $smooth = int(cos($sat_count * 3.1415 / $smoothing_time) * 50 + 50);
-				my $value = $lights{'schedules'}{$light}{$stamp}{'saturation'} - int(($smooth * $sat_diff) / 100);
-				$lights{'schedules'}{$light}{$stamp}{'saturation'} = $value;
-				$lights{'schedules'}{$light}{$stamp}{'sat_smooth'} = $smooth * posneg($sat_diff);
-				$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust; 
-				$lights{'schedules'}{$light}{$stamp}{'use_weather'} = $wth_adjust; 
+				
+			$lights{'schedules'}{$light}{$stamp}{'bri_smooth'} = $bri_result;
+			$lights{'schedules'}{$light}{$stamp}{'sat_smooth'} = $sat_result;
+			$lights{'schedules'}{$light}{$stamp}{'hue_smooth'} = $hue_result;
+			# if the average is not the same as the current value, we're smoothing
+			# but: keep the reset (on = 2) in tact to make the daemon tak control every new period
+			if (($bri_result != $lights{'schedules'}{$light}{$stamp}{'brightness'}) or
+			    ($sat_result != $lights{'schedules'}{$light}{$stamp}{'saturation'}) or
+			    ($hue_result != $lights{'schedules'}{$light}{$stamp}{'hue'}) and
+			    ($lights{'schedules'}{$light}{$stamp}{'on'} != 2)) {
 				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
-				$sat_count++;
-				if ($sat_count > $smoothing_time) {
-					$sat_count = 0;
-					$lights{'schedules'}{$light}{$stamp + 1}{'on'} = 3;
-					$lights{'schedules'}{$light}{$stamp + 1}{'sat_smooth'} = 0;
-				}	
-			}	
-			if ($hue_count > 0) {
-				my $smooth = int(cos($hue_count * 3.1415 / $smoothing_time) * 50 + 50);
-				my $value = $lights{'schedules'}{$light}{$stamp}{'hue'} - int(($smooth * $hue_diff) / 100);
-				$lights{'schedules'}{$light}{$stamp}{'hue'} = $value;
-				$lights{'schedules'}{$light}{$stamp}{'hue_smooth'} = $smooth * posneg($hue_diff);
-				$lights{'schedules'}{$light}{$stamp}{'use_suncycle'} = $sun_adjust; 
-				$lights{'schedules'}{$light}{$stamp}{'use_weather'} = $wth_adjust; 
-				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
-				$hue_count++;
-				if ($hue_count > $smoothing_time) {
-					$hue_count = 0;
-					$lights{'schedules'}{$light}{$stamp + 1}{'on'} = 3;
-					$lights{'schedules'}{$light}{$stamp + 1}{'hue_smooth'} = 0;
-				}	
 			}	
 		}
 	}	
@@ -439,18 +418,12 @@ sub run_schedule_check() {
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		my $name = $config{'lights_defaults'}{$light}{'name'};
 		my $on  = $lights{'schedules'}{$light}{$stamp}{'on'};
-		my $bri = $lights{'schedules'}{$light}{$stamp}{'brightness'};
-		my $sat = $lights{'schedules'}{$light}{$stamp}{'saturation'};
-		my $hue = $lights{'schedules'}{$light}{$stamp}{'hue'};
-		my $sun = $lights{'schedules'}{$light}{$stamp}{'use_suncycle'};
+		# get the smoothed values
+		my $bri = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
+		my $sat = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
+		my $hue = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
 		my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
-		my $sun_val    = 0;
 		my $bri_adjust = 0;
-		my $sat_adjust = 0;
-		my $hue_adjust = 0;
-		my $bri_smooth = 100; # initialize to 100 %
-		my $sat_smooth = 100;
-		my $hue_smooth = 100;
 
 		# get current values
 		my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
@@ -461,32 +434,16 @@ sub run_schedule_check() {
 		#     -> 3 = smooth
 		# printt (" $light ($name)\n");
 		if ($on) {
-			# smoothing is activated if is $on = 3, therefore set the values
-			if ($on == 3) {
-				$bri_smooth = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
-				$sat_smooth = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
-				$hue_smooth = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
-			}	
-
-			# adjust for sun?
-			if ($sun == 1) {
-				# get the adjustement for sun cycle (%)
-				$sun_val = get_suncycle($stamp);
-				# recalculate the adjustment, using the returned % and the configured base value value
-				$bri_adjust += int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
-			}	
-			
 			# adjust for weather?
 			if ($wth == 1) {
 				# recalculate the adjustment, using the returned % and the configured base value value
 				# also adjust for the sun, as the sun_adjust gets higher, the effect of the weather adjustment should get lower
+				my $sun_val = get_suncycle($stamp);
 				$bri_adjust += int($config{'config'}{'adjust'}{'clouds'} * ((100 - $sun_val) * $clouds / 10000)); # 2 percentages, hence the division by 10000
 			}	
 
 			# finalize brightness/saturation/hue, also include smoothing
-			$bri += int($bri_adjust * abs($bri_smooth/100));
-			$sat += int($sat_adjust * abs($sat_smooth/100));
-			$hue += int($hue_adjust * abs($hue_smooth/100));
+			$bri += $bri_adjust;
 			# make sure these don't go out of range
 			minmax(\$bri,0,254);
 			minmax(\$sat,0,254);
@@ -496,6 +453,7 @@ sub run_schedule_check() {
 			# - override (on restart/reset of hued) -> always change
 			# - reset (on starts of new periods)    -> always change
 			# - customized externally               -> never change 
+			# - suncycle                            -> change
 			# - smoothing                           -> change
 			# - in other cases                      -> no change
 			# for logging purposes the adjust value is also used to reflect what kind of action was taken, 
@@ -504,25 +462,26 @@ sub run_schedule_check() {
 			if (($on == 2) or $override) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				$lights{'previous'}{$light}{'altered'} = 'no';
-				printt (" LIGHT$light ($name) adjusted from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
+				printt (" LIGHT$light ($name) overridden from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
 				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
-			
-			# if one or more values is not the same as the previous value, it was probably modified, leave it alone
+			# has the light changed beyond our control?	
 			} elsif (($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
-				($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
-				($cur_hue != $lights{'previous'}{$light}{'hue'}) or
-				($cur_onoff eq 'false')) {
-
+				 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
+				 ($cur_hue != $lights{'previous'}{$light}{'hue'})) {
+				printt (" LIGHT$light ($name) not adjusted (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 				$lights{'previous'}{$light}{'altered'} = 'yes';
-				printt (" LIGHT$light ($name) was not adjusted (altered externally, current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
-				
-			# smoothing needed?
+			# are we in sun cycle adjustments?
+			} elsif ($on == 4) {
+				light_adjust($light,'true',$bri,$sat,$hue);
+				$lights{'previous'}{$light}{'altered'} = 'no';
+				printt (" LIGHT$light ($name) suncycle adjustment from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
+			# are we smoothing?
 			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				$lights{'previous'}{$light}{'altered'} = 'no';
 				printt (" LIGHT$light ($name) smoothing from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
 			} else {	
-				printt (" LIGHT$light ($name) remains the same\n");
+				printt (" LIGHT$light ($name) on (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 				$lights{'previous'}{$light}{'altered'} = 'no';
 			}	
 
@@ -1007,7 +966,11 @@ if (not connect_database()) {
 
 calculate_suncycle(\%suncycle);
 calculate_default_schedules();
-## print Dumper(\%{$lights{'schedules'}{1}});
+smooth_default_schedules();
+open (D,">dump");
+print D Dumper(\%{$lights{'schedules'}{1}});
+close (D);
+
 dump_suncycle_to_database(\%suncycle);
 $clouds = get_cloudiness();
 
