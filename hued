@@ -5,8 +5,6 @@
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
 
-# TODO: check if another daemon is already running
-
 # use clauses
 use strict;
 use POSIX;
@@ -356,8 +354,8 @@ sub smooth_default_schedules() {
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		# process a whole day
 		printt("Smoothing light $light\n");
-		my $type = 0; # debugging 2 methods
 		foreach my $stamp (0..1440) {
+			# printt ("$stamp has on value of 2\n") if ($lights{'schedules'}{$light}{$stamp}{'on'} == 2);
 			# get a weighted (using a cosine curve) average for the current $stamp
 			my $bri_value    = 0;
 			my $bri_result   = 0;
@@ -366,31 +364,18 @@ sub smooth_default_schedules() {
 			my $hue_value    = 0;
 			my $hue_result   = 0;
 			my $weight_total = 0;
-			if ($type == 0) {
-				for (my $index = -int($smoothing_time/2); $index <= int($smoothing_time/2); $index++ ) {
-					my $weight = cos($index * 3.1415 / $smoothing_time);
-					$weight_total += $weight;
-					my $stamp_index = $stamp + $index;
-					minmax(\$stamp_index,0,1440);
-					$bri_value += $lights{'schedules'}{$light}{$stamp_index}{'brightness'} * $weight;
-					$sat_value += $lights{'schedules'}{$light}{$stamp_index}{'saturation'} * $weight;
-					$hue_value += $lights{'schedules'}{$light}{$stamp_index}{'hue'} * $weight;
-				}
-				$bri_result = round($bri_value/$weight_total);
-				$sat_result = round($sat_value/$weight_total);
-				$hue_result = round($hue_value/$weight_total);
-			} else {	
-				for (my $index = -4; $index <= 5; $index++) {
-					my $stamp_index = $stamp + $index;
-					minmax(\$stamp_index,0,1440);
-					$bri_value += $lights{'schedules'}{$light}{$stamp_index}{'brightness'};
-					$sat_value += $lights{'schedules'}{$light}{$stamp_index}{'saturation'};
-					$hue_value += $lights{'schedules'}{$light}{$stamp_index}{'hue'};
-				}	
-				$bri_result = round($bri_value/10);
-				$sat_result = round($sat_value/10);
-				$hue_result = round($hue_value/10);
-			}	
+			for (my $index = -int($smoothing_time/2); $index <= int($smoothing_time/2); $index++ ) {
+				my $weight = cos($index * 3.1415 / $smoothing_time);
+				$weight_total += $weight;
+				my $stamp_index = $stamp + $index;
+				minmax(\$stamp_index,0,1440);
+				$bri_value += $lights{'schedules'}{$light}{$stamp_index}{'brightness'} * $weight;
+				$sat_value += $lights{'schedules'}{$light}{$stamp_index}{'saturation'} * $weight;
+				$hue_value += $lights{'schedules'}{$light}{$stamp_index}{'hue'} * $weight;
+			}
+			$bri_result = round($bri_value/$weight_total);
+			$sat_result = round($sat_value/$weight_total);
+			$hue_result = round($hue_value/$weight_total);
 				
 			$lights{'schedules'}{$light}{$stamp}{'bri_smooth'} = $bri_result;
 			$lights{'schedules'}{$light}{$stamp}{'sat_smooth'} = $sat_result;
@@ -399,10 +384,10 @@ sub smooth_default_schedules() {
 			# but: keep the reset (on = 2) in tact to make the daemon tak control every new period
 			if (($bri_result != $lights{'schedules'}{$light}{$stamp}{'brightness'}) or
 			    ($sat_result != $lights{'schedules'}{$light}{$stamp}{'saturation'}) or
-			    ($hue_result != $lights{'schedules'}{$light}{$stamp}{'hue'}) and
-			    ($lights{'schedules'}{$light}{$stamp}{'on'} != 2)) {
-				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
+			    ($hue_result != $lights{'schedules'}{$light}{$stamp}{'hue'})) {
+				$lights{'schedules'}{$light}{$stamp}{'on'} = 3 unless ($lights{'schedules'}{$light}{$stamp}{'on'} == 2);
 			}	
+			# printt ("$stamp still has on value of 2\n") if ($lights{'schedules'}{$light}{$stamp}{'on'} == 2);
 		}
 	}	
 }
@@ -699,27 +684,28 @@ sub update_state_file($) {
 	} 
 }
 
-# RC1 = pid matches, RC0 = notok
-sub compare_pid_to_state_file() {
-	my $state_file = $config{'config'}{'logging'}{'hue_state'};
-	my $input;
-	my $pid;
-	my $ts;
-	if (open (SF,"<$state_file")) {
-		while (<SF>) {
-			chomp;
-			$input = $_;
-		}	
-		close (SF);
-		($pid,$ts) = ($input =~ /^(\d+) - (.*)/);
-		if ($$ == $pid) {
-			printt ("");
-		}	
-		return 1;
+# RC1 = found another daemon, RC0 = no other daemon found
+sub check_running_hued() {
+	my $ps = "/bin/ps -C hued -o pid,start,cmd --no-heading";
+	my $ps_output = "";
+	my $rc = 0;
+	
+	if ($child_pid = open (PS,"-|","$ps")) {
+		alarm($timeout);
+		while (<PS>) {
+			$ps_output .= $_;	
+			my ($pid) = ($_ =~ /^\s*(\d+)\s+/);
+			$rc++ if ($pid != $$);
+		}
+		close(PS);
+		alarm(0);
 	} else {
-		return 0;
+		return 42;
 	}	
+	printt ("check_running_hued => $ps_output\n") if ($rc > 0);
+	return $rc;
 }	
+
 
 # nice and tidy
 sub self_clean_log() {
@@ -932,6 +918,8 @@ $| = 1;
 
 load_config();
 
+printt("pre-fork PID: $$\n");
+
 # daemonize?
 if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
 	# daemonize this! (from the Perl Cookbook)
@@ -944,6 +932,10 @@ if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
 	# diassociate from controlling terminal..
 	POSIX:setsid() or die "Can't start a new session $!\n";
 	printt ("hued started - DAEMON MODE - PID: $$\n");
+	if (check_running_hued()) {
+		printt ("hued terminated - another daemon found\n");
+		exit 1;
+	}
 	set_STDERR($config{'config'}{'logging'}{'hue_log'});
 	set_STDOUT($config{'config'}{'logging'}{'hue_log'});
 } else {	
@@ -968,7 +960,7 @@ calculate_suncycle(\%suncycle);
 calculate_default_schedules();
 smooth_default_schedules();
 open (D,">dump");
-print D Dumper(\%{$lights{'schedules'}{1}});
+# print D Dumper(\%{$lights{'schedules'}{1}});
 close (D);
 
 dump_suncycle_to_database(\%suncycle);
