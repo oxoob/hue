@@ -29,10 +29,9 @@ my $dbh; # global database handler
 
 # daemon control variables
 my $i_should_run;
-my $i_should_rerun;
 my $i_should_reload_config;
 my $i_caught_a_signal;
-my $override = 1; # when the daemon starts, reruns, make the daemon set the lights, no matter what
+my $override = 1; # when the daemon starts, make the daemon set the lights, no matter what
 my $last_minute = 99; # initialize to an impossible value 
 my $pid;
 my $child_pid;
@@ -446,7 +445,7 @@ sub run_schedule_check() {
 			# reset or override needed?
 			if (($on == 2) or $override) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				$lights{'previous'}{$light}{'altered'} = 'no';
+				### $lights{'previous'}{$light}{'altered'} = 'no';
 				printt (" LIGHT$light ($name) overridden from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
 				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
 			# has the light changed beyond our control?	
@@ -454,57 +453,51 @@ sub run_schedule_check() {
 				 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
 				 ($cur_hue != $lights{'previous'}{$light}{'hue'})) {
 				printt (" LIGHT$light ($name) not adjusted (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
-				$lights{'previous'}{$light}{'altered'} = 'yes';
+				### $lights{'previous'}{$light}{'altered'} = 'yes';
 			# are we in sun cycle adjustments?
 			} elsif ($on == 4) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				$lights{'previous'}{$light}{'altered'} = 'no';
+				### $lights{'previous'}{$light}{'altered'} = 'no';
 				printt (" LIGHT$light ($name) suncycle adjustment from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
 			# are we smoothing?
 			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				$lights{'previous'}{$light}{'altered'} = 'no';
+				### $lights{'previous'}{$light}{'altered'} = 'no';
 				printt (" LIGHT$light ($name) smoothing from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
 			} else {	
 				printt (" LIGHT$light ($name) on (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
-				$lights{'previous'}{$light}{'altered'} = 'no';
+				### $lights{'previous'}{$light}{'altered'} = 'no';
 			}	
 
 			log_to_database('lights',$db_stamp, {	'primary_key'=>"$db_stamp $light", 'light'=>$light, 
 								'set_bri'=>$bri, 'set_sat'=>$sat, 'set_hue'=>$hue, 
 								'current_bri'=>$cur_bri, 'current_sat'=>$cur_sat, 'current_hue'=>$cur_hue});
-
-			# store the current values as previous
-			$lights{'previous'}{$light}{'brightness'} = $bri;
-			$lights{'previous'}{$light}{'saturation'} = $sat;
-			$lights{'previous'}{$light}{'hue'} = $hue;
-
 		} else {
 			# turn it off, unless it was in an altered state
-			if (exists($lights{'previous'}{$light}{'altered'}) and ($lights{'previous'}{$light}{'altered'} eq 'yes')) {
-				printt (" LIGHT$light ($name) not changed\n");
-			} elsif ($cur_onoff eq 'true') {	
+			### if (exists($lights{'previous'}{$light}{'altered'}) and ($lights{'previous'}{$light}{'altered'} eq 'yes')) {
+			###	printt (" LIGHT$light ($name) not changed\n");
+			### } elsif ($cur_onoff eq 'true') {	
+			if ($cur_onoff eq 'true') {	
 				light_adjust($light,'false',0,0,0);
 				printt (" LIGHT$light ($name) turned off\n");
-				$lights{'previous'}{$light}{'altered'} = 'no';
+				### $lights{'previous'}{$light}{'altered'} = 'no';
 			} else {	
 				printt (" LIGHT$light ($name) remains off\n");
 			}	
 			
 			# prevent the daemon from turning off a light that was adjusted
-			if (exists($lights{'previous'}{$light}{'brightness'}) and 
-				(($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
-				 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
-				 ($cur_hue != $lights{'previous'}{$light}{'hue'}) or
-				 ($cur_onoff eq 'true'))) {
-				$lights{'previous'}{$light}{'altered'} = 'yes';
-			}	
-
-			# store the current values as previous
-			$lights{'previous'}{$light}{'brightness'} = $cur_bri;
-			$lights{'previous'}{$light}{'saturation'} = $cur_sat;
-			$lights{'previous'}{$light}{'hue'} = $cur_hue;
+			### if (exists($lights{'previous'}{$light}{'brightness'}) and 
+			###	(($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
+			###	 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
+			###	 ($cur_hue != $lights{'previous'}{$light}{'hue'}) or
+			###	 ($cur_onoff eq 'true'))) {
+			###	$lights{'previous'}{$light}{'altered'} = 'yes';
+			### }	
 		}
+		# store the current values as previous
+		$lights{'previous'}{$light}{'brightness'} = $bri;
+		$lights{'previous'}{$light}{'saturation'} = $sat;
+		$lights{'previous'}{$light}{'hue'} = $hue;
 	}
 }
 
@@ -867,12 +860,6 @@ sub signal_usr1 {
 	$override = 1;
 } 
 
-sub signal_usr2 {
-	printt ("### Caught USR2 - restart\n");
-       	$i_should_rerun = 1;
-	$override = 1;
-}
-
 # loads config, but empties it first
 sub load_config() {
 	%config = ();
@@ -947,7 +934,6 @@ if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
 $SIG{INT} = $SIG{TERM} = \&signal_term;
 $SIG{HUP} = \&signal_hup;
 $SIG{USR1} = \&signal_usr1;
-$SIG{USR2} = \&signal_usr2;
 $SIG{ALRM} = \&kill_child;
 
 # rudimentary handling of DB connection
@@ -967,7 +953,6 @@ dump_suncycle_to_database(\%suncycle);
 $clouds = get_cloudiness();
 
 $i_should_run=1;
-$i_should_rerun=0;
 $i_should_reload_config=0;
 $i_caught_a_signal=0;
 
@@ -1017,14 +1002,6 @@ while ($i_should_run) {
 	$i_should_reload_config=0;
 	$i_caught_a_signal=0;
 
-	if ($i_should_rerun) {
-		close(PH);
-		my $newpid = fork();
-		printt ("FORKED: $$ -> $newpid\n");
-		$i_should_run=1;
-		$i_should_rerun=0;
-		exit if ($newpid);
-	}	
 }
 
 update_state_file('empty');
