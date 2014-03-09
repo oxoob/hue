@@ -294,8 +294,6 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
-					# trigger reset at start of period
-					$lights{'schedules'}{$light}{$ss}{'on'} = 2;
 				}	
 			} else {	
 				foreach my $light (@on_lights) {
@@ -333,8 +331,6 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
-					# trigger reset at start of period
-					$lights{'schedules'}{$light}{$ss}{'on'} = 2;
 				}
 			}	
 		}	
@@ -354,7 +350,6 @@ sub smooth_default_schedules() {
 		# process a whole day
 		printt("Smoothing light $light\n");
 		foreach my $stamp (0..1440) {
-			# printt ("$stamp has on value of 2\n") if ($lights{'schedules'}{$light}{$stamp}{'on'} == 2);
 			# get a weighted (using a cosine curve) average for the current $stamp
 			my $bri_value    = 0;
 			my $bri_result   = 0;
@@ -384,10 +379,29 @@ sub smooth_default_schedules() {
 			if (($bri_result != $lights{'schedules'}{$light}{$stamp}{'brightness'}) or
 			    ($sat_result != $lights{'schedules'}{$light}{$stamp}{'saturation'}) or
 			    ($hue_result != $lights{'schedules'}{$light}{$stamp}{'hue'})) {
-				$lights{'schedules'}{$light}{$stamp}{'on'} = 3 unless ($lights{'schedules'}{$light}{$stamp}{'on'} == 2);
+				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
+				$lights{'schedules'}{$light}{$stamp+1}{'on'} = 3; # also work ahead one, to properly complete the smoothing.
 			}	
-			# printt ("$stamp still has on value of 2\n") if ($lights{'schedules'}{$light}{$stamp}{'on'} == 2);
 		}
+		# after smooting, trigger a reset in the step prior to the smoothing
+		my $count = 0;
+		my $start;
+		foreach my $stamp (0..1440) {
+			# a first found smooth, set the start and start increasing the counter
+			if ($lights{'schedules'}{$light}{$stamp}{'on'} == 3) { 
+				if ($count == 0) {
+					$start = $stamp - 1;
+				}	
+				$count++;
+			}
+			# consider a smoothing streak if more than 4 steps in a row are smoothed
+			# but only if a step does not have smoothing and suncycle adjustment set
+			if (($count > 4) and ($lights{'schedules'}{$light}{$stamp}{'on'} != 3) and ($lights{'schedules'}{$light}{$stamp}{'on'} != 4)) {
+				# set the reset state an reset the counter
+				$lights{'schedules'}{$light}{$start}{'on'} = 2;
+				$count = 0;
+			}
+		}	
 	}	
 }
 
@@ -426,7 +440,7 @@ sub run_schedule_check() {
 				$bri_adjust += int($config{'config'}{'adjust'}{'clouds'} * ((100 - $sun_val) * $clouds / 10000)); # 2 percentages, hence the division by 10000
 			}	
 
-			# finalize brightness/saturation/hue, also include smoothing
+			# finalize brightness/saturation/hue
 			$bri += $bri_adjust;
 			# make sure these don't go out of range
 			minmax(\$bri,0,254);
@@ -538,6 +552,8 @@ sub light_adjust($$$$$) {
 	# to get a match on success. TODO
 	if ($curl_returncode == 0 and $curl_output =~ /success/) {
 		# printt ("  a+ light $light adjusted\n");
+		printt (" - curl RC : $curl_returncode\n");
+		printt (" - curl out: $curl_output\n");
 		return 1;
 	} else {	
 		# printt ("  a- light $light not adjusted\n");
@@ -571,8 +587,6 @@ sub curl_hue($$;$) {
 		$curl_RC = $?;
 		alarm(0);
 	}
-	# printt ("    - curl RC : $curl_RC\n");
-	# printt ("  x- curl out: $curl_output\n");
 	return ($curl_RC, $curl_output);
 }	
 	
@@ -946,7 +960,7 @@ calculate_suncycle(\%suncycle);
 calculate_default_schedules();
 smooth_default_schedules();
 open (D,">dump");
-# print D Dumper(\%{$lights{'schedules'}{1}});
+print D Dumper(\%{$lights{'schedules'}{1}});
 close (D);
 
 dump_suncycle_to_database(\%suncycle);
