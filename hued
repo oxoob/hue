@@ -27,7 +27,6 @@ $Data::Dumper::Sortkeys = sub {[sort {$a <=> $b} keys %{$_[0]}]};
 my %config;
 my %lights;
 my %suncycle;
-my $pause;
 my $hue;
 my $clouds; # global var for storing cloudiness (so it does not have to be checked all the time)
 my $dbh; # global database handler
@@ -104,8 +103,8 @@ sub log_to_database($$$) {
 		return 1;
 	}	
 	my $table = shift; # lights, sun, weather
-	my $datetime = shift; # 1987-12-23 09:34:12
-	my $data = shift; # a hash containing field, value pairs
+	my $time  = shift; # 09:34:12
+	my $data  = shift; # a hash containing field, value pairs
 	my $query;
 	my $result = 1;
 	
@@ -116,7 +115,7 @@ sub log_to_database($$$) {
 	}
 	# remove trailing comma
 	$set =~ s/,$//g;
-	$query = "INSERT INTO $table SET `datetime`='$datetime',$set ON DUPLICATE KEY UPDATE $set";
+	$query = "INSERT INTO $table SET `time`='$time',$set ON DUPLICATE KEY UPDATE $set";
 
 	# update db
 	if (my $sth = $dbh->prepare($query)) {
@@ -131,52 +130,52 @@ sub log_to_database($$$) {
 	return $result;
 }
 
-# a very! basic function to attempt to emulate dawn and dusk's increase and decrease in light
-# expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. same as cloudiness
-sub calculate_suncycle($) {
-	my $suncycle_ref = shift;
-	my $rise    = sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
-	my $sunrise = int(mins($rise));
-	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
-	my $sunset  = int(mins($set));
-	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
-	my $length  = int(5 + 50 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
-	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
-
-	# night
-	for (my $minute = 0; $minute < int($sunrise - $length/2); $minute++) {
-		$$suncycle_ref{$minute} = 100;
-	}
-	# sunrise
-	for (my $minute = int($sunrise - $length/2); $minute < int($sunrise + $length/2); $minute++) {
-		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/2))/$length * 3.1415)); 
-		$$suncycle_ref{$minute} = $val;
+# operates on global dbh
+# RC1 = ok, RC0 = not ok
+sub log_query_to_database($) {
+	# bail out if DB is not to be used, no error
+	if ($config{'config'}{'db'}{'use'} eq "no") {
+		return 1;
 	}	
-	# day
-	for (my $minute = int($sunrise + $length/2); $minute < int($sunset - $length/2); $minute++) {
-		$$suncycle_ref{$minute} = 0;
-	}
-	# sunset
-	for (my $minute = int($sunset - $length/2); $minute < int($sunset + $length/2); $minute++) {
-		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/2))/$length * 3.1415)); 
-		$$suncycle_ref{$minute} = $val;
+	my $query = shift; # 
+	my $result = 1;
+	
+	# update db
+	if (my $sth = $dbh->prepare($query)) {
+		if (not $sth->execute) {
+			printt ("DB execute: $DBI::errstr\n");
+			printt ("$query\n");
+			$result = 0;
+		}
+	} else {
+		printt ("DB prepare: $DBI::errstr\n");
+		printt ("$query\n");
+		$result = 0;
 	}	
-	# night
-	for (my $minute = int($sunset + $length/2); $minute <= 1440; $minute++) {
-		$$suncycle_ref{$minute} = 100;
-	}
+	return $result;
 }
 
-sub dump_suncycle_to_database($) {
-	my $suncycle_ref = shift;
-	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
-	my $date;
-	my $time;
-	$date = sprintf("%04d-%02d-%02d",$now_year + 1900, $now_month + 1, $now_day);
-	for (my $minute = 0; $minute <= 1440; $minute++) {
-		$time = snim($minute);
-		log_to_database('sun',"$date $time",{'percentage' => $$suncycle_ref{$minute}});
-	}		
+sub truncate_table($) {
+	# bail out if DB is not to be used, no error
+	if ($config{'config'}{'db'}{'use'} eq "no") {
+		return 1;
+	}	
+
+	my $table = shift;
+	my $query = "TRUNCATE TABLE `$table`";
+	my $result = 1;
+
+	# update db
+	if (my $sth = $dbh->prepare($query)) {
+		if (not $sth->execute) {
+			printt ("DB execute: $DBI::errstr\n");
+			$result = 0;
+		}
+	} else {
+		printt ("DB prepare: $DBI::errstr\n");
+		$result = 0;
+	}	
+	return $result;
 }
 
 # search a value in an array, both numerical as alfa
@@ -231,19 +230,71 @@ sub by_start_time {
 	mins($config{'schedule'}{$a}{'start_time'}) <=> mins($config{'schedule'}{$b}{'start_time'});
 }	
 	
+# a very! basic function to attempt to emulate dawn and dusk's increase and decrease in light
+# expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. same as cloudiness
+sub calculate_suncycle($) {
+	my $suncycle_ref = shift;
+	my $time;
+	my $rise    = sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
+	my $sunrise = int(mins($rise));
+	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
+	my $sunset  = int(mins($set));
+	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
+	my $length  = int(5 + 50 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
+
+	# night
+	for (my $minute = 0; $minute < int($sunrise - $length/2); $minute++) {
+		$$suncycle_ref{$minute} = 100;
+	}
+	# sunrise
+	for (my $minute = int($sunrise - $length/2); $minute < int($sunrise + $length/2); $minute++) {
+		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/2))/$length * 3.1415)); 
+		$$suncycle_ref{$minute} = $val;
+	}	
+	# day
+	for (my $minute = int($sunrise + $length/2); $minute < int($sunset - $length/2); $minute++) {
+		$$suncycle_ref{$minute} = 0;
+	}
+	# sunset
+	for (my $minute = int($sunset - $length/2); $minute < int($sunset + $length/2); $minute++) {
+		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/2))/$length * 3.1415)); 
+		$$suncycle_ref{$minute} = $val;
+	}	
+	# night
+	for (my $minute = int($sunset + $length/2); $minute <= 1440; $minute++) {
+		$$suncycle_ref{$minute} = 100;
+	}
+
+	# update the database
+	truncate_table('sun');
+	my $query = "INSERT INTO `sun` (time,percentage) VALUES";
+	for (my $minute = 0; $minute <= 1440; $minute++) {
+		$time = snim($minute);
+		$query .= "('$time','$$suncycle_ref{$minute}'),";
+	}		
+	$query =~ s/,$//g;
+	log_query_to_database($query);
+}
+
 # calculate the base values per light, based on config
 # that means incuding warmer/brighter/cooler/etc. values, but not the sun and cloudiness
 # store in global %ligthts{'schedules'} 
 sub calculate_default_schedules() {
 	%lights = ();
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+	my $time;
+	my $query; 
+	my $query_a;
+	truncate_table('lights_scheduled');
+	truncate_table('lights_adjusted');
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
-
 	printt ("Calculating schedules:\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
 			$lights{'schedules'}{$light}{$stamp}{'brightness'}   = 0;
+			$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = 0;
 			$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'};
 			$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'};
 			$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = 0;
@@ -257,10 +308,11 @@ sub calculate_default_schedules() {
 		my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights'});
 		my $ss = mins($config{'schedule'}{$schedule}{'start_time'});
 		my $se = mins($config{'schedule'}{$schedule}{'end_time'});
-		printt ("  $schedule => start $ss ($config{'schedule'}{$schedule}{'start_time'}), end $se ($config{'schedule'}{$schedule}{'end_time'}) '" . join(",", @days) . "'\n");
+		printt (" $schedule => start : $ss ($config{'schedule'}{$schedule}{'start_time'}), end: $se ($config{'schedule'}{$schedule}{'end_time'})\n");
+		printt (" $schedule => days  : '" . join(",", @days) . "'\n");
 		
 		if (in($now_dow,\@days)) {
-			printt ("  $schedule => $now_dow matched - calculating..\n");
+			printt (" $schedule =>       day $now_dow matched - calculating..\n");
 			my $bri_adjust = 0;
 			my $sat_adjust = 0;
 			my $hue_adjust = 0;
@@ -304,6 +356,7 @@ sub calculate_default_schedules() {
 							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
 						}	
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
+						$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
@@ -324,6 +377,7 @@ sub calculate_default_schedules() {
 							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
 						}	
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
+						$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
@@ -341,6 +395,7 @@ sub calculate_default_schedules() {
 							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
 						}	
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
+						$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
@@ -350,11 +405,33 @@ sub calculate_default_schedules() {
 			}	
 		}	
 	}
+
+	# dump to database
+        $query   = "INSERT INTO `lights_scheduled` (primary_key,time,light,scheduled_bri,scheduled_sat,scheduled_hue) VALUES";
+        $query_a = "INSERT INTO `lights_adjusted` (primary_key,time,light,adjusted_bri,adjusted_sat,adjusted_hue) VALUES";
+	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
+			$time = snim($stamp);
+			$query   .= "('$time $light','$time','$light','$lights{'schedules'}{$light}{$stamp}{'brightnessx'}',
+					'$lights{'schedules'}{$light}{$stamp}{'saturation'}','$lights{'schedules'}{$light}{$stamp}{'hue'}'),";
+			$query_a .= "('$time $light','$time','$light','$lights{'schedules'}{$light}{$stamp}{'brightness'}',
+					'$lights{'schedules'}{$light}{$stamp}{'saturation'}','$lights{'schedules'}{$light}{$stamp}{'hue'}'),";
+		}
+	}	
+	$query =~ s/,$//g;
+	log_query_to_database($query);
+	$query_a =~ s/,$//g;
+	log_query_to_database($query_a);
 }
 
 # do the smoothing
 sub smooth_default_schedules() {
 	my $smoothing_time = $config{'config'}{'adjust'}{'smoothing_time'};
+	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+	my $date = sprintf("%04d-%02d-%02d",$now_year + 1900, $now_month + 1, $now_day);
+	my $time;
+	my $query;
+	truncate_table('lights_smoothed');
 
 	printt ("Smoothing schedules:\n");
 	# initialize a day worth of data for each light in defaults
@@ -364,6 +441,7 @@ sub smooth_default_schedules() {
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		# process a whole day
 		printt("Smoothing light $light\n");
+        	$query   = "INSERT INTO `lights_smoothed` (primary_key,time,light,smoothed_bri,smoothed_sat,smoothed_hue) VALUES ";
 		foreach my $stamp (0..1440) {
 			# get a weighted (using a cosine curve) average for the current $stamp
 			my $bri_value    = 0;
@@ -397,7 +475,11 @@ sub smooth_default_schedules() {
 				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
 				$lights{'schedules'}{$light}{$stamp+1}{'on'} = 3; # also work ahead one, to properly complete the smoothing.
 			}	
+			$time = snim($stamp);
+			$query   .= "('$time $light','$time','$light','$bri_result','$sat_result','$hue_result'),";
 		}
+		$query =~ s/,$//g;
+		log_query_to_database($query);
 		# after smooting, trigger a reset in the step prior to the smoothing, $start is the timestamp that will be the reset moment
 		my $count = 0;
 		my $start;
@@ -418,6 +500,7 @@ sub smooth_default_schedules() {
 			}
 			# oh and while we're at it:
 			delete($lights{'schedules'}{$light}{$stamp}{'brightness'});
+			delete($lights{'schedules'}{$light}{$stamp}{'brightnessx'});
 			delete($lights{'schedules'}{$light}{$stamp}{'saturation'});
 			delete($lights{'schedules'}{$light}{$stamp}{'hue'});
 		}	
@@ -631,7 +714,7 @@ sub get_cloudiness() {
 	my $curl_output;
 	my $curl_returncode;
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
-	my $db_stamp = sprintf("%04d-%02d-%02d %02d:%02d:00",$now_year + 1900, $now_month + 1, $now_day, $now_hour, $now_minute);
+	my $time = sprintf("%02d:%02d:00", $now_hour, $now_minute);
 	my $clouds = -1; # 100 = heavy overcast, 0 = clear sky, -1 = no value
 	
 	# setup a curl session to openweathermap
@@ -660,7 +743,7 @@ sub get_cloudiness() {
 		printt (" !! curl to $open_weather_map_url failed\n");
 	}	
 
-	log_to_database('weather',"$db_stamp",{'percentage'=>$return_value});
+	log_to_database('weather',"$time",{'percentage'=>$return_value});
 	return $return_value;
 }
 
@@ -770,22 +853,25 @@ sub self_clean_log() {
 # operates on global dbh
 # RC1 = ok, RC0 = not ok
 sub self_clean_database() {
+	# bail out if DB is not to be used, no error
+	if ($config{'config'}{'db'}{'use'} eq "no") {
+		return 1;
+	}	
 	my $query;
 	my $result = 1;
-	my @tables = ('sun','weather','lights');
+	my @tables = ('sun','weather','lights_adjusted','lights_scheduled','lights_smoothed');
 	
 	foreach my $table (@tables) {
-		# delete anything older than 2 days (172800 seconds)
-		$query = "DELETE  FROM `$table` WHERE unix_timestamp() - unix_timestamp(`datetime`) > 172800";
-		if (my $sth = $dbh->prepare($query)) {
-			if (not $sth->execute) {
-				printt ("DB execute (cleanup $table):\n$DBI::errstr\n");
-				$result = 0;
-			}
-		} else {
-			printt ("DB prepare (cleanup $table):\n$DBI::errstr\n");
-			$result = 0;
-		}	
+		## $query = "DELETE  FROM `$table` WHERE unix_timestamp() - unix_timestamp(`datetime`) > 172800";
+		## if (my $sth = $dbh->prepare($query)) {
+		##	if (not $sth->execute) {
+		##		printt ("DB execute (cleanup $table):\n$DBI::errstr\n");
+		##		$result = 0;
+		##	}
+		## } else {
+		##	printt ("DB prepare (cleanup $table):\n$DBI::errstr\n");
+		##	$result = 0;
+		## }	
 		# defrag
 		$query = "ALTER TABLE `$table` ENGINE = InnoDB";
 		if (my $sth = $dbh->prepare($query)) {
@@ -968,7 +1054,6 @@ smooth_default_schedules();
 # print D Dumper(\%{$lights{'schedules'}{1}});
 # close (D);
 
-dump_suncycle_to_database(\%suncycle);
 $clouds = get_cloudiness();
 
 $i_should_run=1;
@@ -1007,7 +1092,6 @@ while ($i_should_run) {
 			calculate_suncycle(\%suncycle);
 			calculate_default_schedules();
 			smooth_default_schedules();
-			dump_suncycle_to_database(\%suncycle);
 		}	
 		$last_minute = $now_minute;
 		# reset override
@@ -1020,7 +1104,6 @@ while ($i_should_run) {
 		calculate_suncycle(\%suncycle);
 		calculate_default_schedules();
 		smooth_default_schedules();
-		dump_suncycle_to_database(\%suncycle);
 	}
 	
 	$i_should_reload_config=0;
