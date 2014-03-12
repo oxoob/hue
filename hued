@@ -5,7 +5,6 @@
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
 
-# TODO: minimize the amount of calls to the hue controller
 # TODO: make randomization of start/end times possible 
 # TODO: make the push messages more descriptive (start + end values)
 
