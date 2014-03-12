@@ -5,6 +5,9 @@
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
 
+# TODO: minimize the amount of calls to the hue controller
+# TODO: make randomization of start/end times possible 
+
 # use clauses
 use strict;
 use POSIX;
@@ -15,8 +18,10 @@ use DateTime;
 use Astro::Sunrise;
 use DBI;
 use Data::Dumper;
+# a numeric sort (can cause loads of warnings if values are non-numeric:
 $Data::Dumper::Sortkeys = sub {[sort {$a <=> $b} keys %{$_[0]}]};
-# $Data::Dumper::Sortkeys = 1; # sub {[sort {$a <=> $b} keys %{$_[0]}]};
+# just a sort:
+# $Data::Dumper::Sortkeys = 1;
 
 # global variables
 my %config;
@@ -221,6 +226,7 @@ sub by_start_time {
 # that means incuding warmer/brighter/cooler/etc. values, but not the sun and cloudiness
 # store in global %ligthts{'schedules'} 
 sub calculate_default_schedules() {
+	%lights = ();
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 
@@ -966,9 +972,10 @@ if (not connect_database()) {
 calculate_suncycle(\%suncycle);
 calculate_default_schedules();
 smooth_default_schedules();
-open (D,">dump");
+## for debugging the flow of values
+# open (D,">dump");
 # print D Dumper(\%{$lights{'schedules'}{1}});
-close (D);
+# close (D);
 
 dump_suncycle_to_database(\%suncycle);
 $clouds = get_cloudiness();
