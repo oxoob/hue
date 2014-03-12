@@ -7,6 +7,7 @@
 
 # TODO: minimize the amount of calls to the hue controller
 # TODO: make randomization of start/end times possible 
+# TODO: make the push messages more descriptive (start + end values)
 
 # use clauses
 use strict;
