@@ -82,6 +82,11 @@ sub open_hue_file($) {
 
 # RC1 = ok, RC0 = not
 sub connect_database() {
+	# bail out if DB is not to be used, no error
+	if ($config{'config'}{'db'}{'use'} eq "no") {
+		printt ("DB not used\n");
+		return 1;
+	}	
 	if ($dbh = DBI->connect("dbi:mysql:$config{'config'}{'db'}{'db'}",$config{'config'}{'db'}{'user'},$config{'config'}{'db'}{'pwd'})) {
 		printt ("DB $config{'config'}{'db'}{'db'} connected\n");
 		return 1;
@@ -95,6 +100,10 @@ sub connect_database() {
 # operates on global dbh
 # RC1 = ok, RC0 = not ok
 sub log_to_database($$$) {
+	# bail out if DB is not to be used, no error
+	if ($config{'config'}{'db'}{'use'} eq "no") {
+		return 1;
+	}	
 	my $table = shift; # lights, sun, weather
 	my $datetime = shift; # 1987-12-23 09:34:12
 	my $data = shift; # a hash containing field, value pairs
@@ -390,7 +399,7 @@ sub smooth_default_schedules() {
 				$lights{'schedules'}{$light}{$stamp+1}{'on'} = 3; # also work ahead one, to properly complete the smoothing.
 			}	
 		}
-		# after smooting, trigger a reset in the step prior to the smoothing
+		# after smooting, trigger a reset in the step prior to the smoothing, $start is the timestamp that will be the reset moment
 		my $count = 0;
 		my $start;
 		foreach my $stamp (0..1440) {
@@ -414,6 +423,7 @@ sub smooth_default_schedules() {
 			delete($lights{'schedules'}{$light}{$stamp}{'hue'});
 		}	
 	}	
+	printt ("Smoothing done\n");
 }
 
 # run_schedule_check; this run_schedule_checks on the timer and does matching and processing
@@ -434,8 +444,9 @@ sub run_schedule_check() {
 		my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
 		my $bri_adjust = 0;
 
-		# get current values
-		my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
+		#### anthing adding to minimizing external calls hashed out ####
+		#### # get current values
+		#### my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
 
 		# $on -> 0 = off
 		#     -> 1 = on
@@ -470,63 +481,43 @@ sub run_schedule_check() {
 			# reset or override needed? - separated these choices
 			if ($override) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				### $lights{'previous'}{$light}{'altered'} = 'no';
-				printt (" LIGHT$light ($name) overridden from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
+				printt ("LIGHT$light ($name) overridden to $bri/$sat/$hue\n");
 			} elsif ($on == 2) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				### $lights{'previous'}{$light}{'altered'} = 'no';
-				printt (" LIGHT$light ($name) reset from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
-				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
-			# has the light changed beyond our control?	
-			} elsif (($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
-				 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
-				 ($cur_hue != $lights{'previous'}{$light}{'hue'})) {
-				printt (" LIGHT$light ($name) not adjusted (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
-				### $lights{'previous'}{$light}{'altered'} = 'yes';
+				printt ("LIGHT$light ($name) reset to $bri/$sat/$hue\n");
+				#### pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
+			#### # has the light changed beyond our control?	
+			#### } elsif (($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
+			####	 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
+			####	 ($cur_hue != $lights{'previous'}{$light}{'hue'})) {
+			####	printt (" LIGHT$light ($name) not adjusted (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 			# are we in sun cycle adjustments?
 			} elsif ($on == 4) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				### $lights{'previous'}{$light}{'altered'} = 'no';
-				printt (" LIGHT$light ($name) suncycle adjustment from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
+				printt ("LIGHT$light ($name) suncycle adjustment to $bri/$sat/$hue\n");
 			# are we smoothing?
 			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				### $lights{'previous'}{$light}{'altered'} = 'no';
-				printt (" LIGHT$light ($name) smoothing from $cur_bri/$cur_sat/$cur_hue to $bri/$sat/$hue\n");
-			} else {	
-				printt (" LIGHT$light ($name) on (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
-				### $lights{'previous'}{$light}{'altered'} = 'no';
+				printt ("LIGHT$light ($name) smoothing to $bri/$sat/$hue\n");
+			#### } else {
+			####	printt ("LIGHT$light ($name) on (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 			}	
 
-			log_to_database('lights',$db_stamp, {	'primary_key'=>"$db_stamp $light", 'light'=>$light, 
-								'set_bri'=>$bri, 'set_sat'=>$sat, 'set_hue'=>$hue, 
-								'current_bri'=>$cur_bri, 'current_sat'=>$cur_sat, 'current_hue'=>$cur_hue});
+			#### log_to_database('lights',$db_stamp, {	'primary_key'=>"$db_stamp $light", 'light'=>$light, 
+			####					'set_bri'=>$bri, 'set_sat'=>$sat, 'set_hue'=>$hue, 
+			####					'current_bri'=>$cur_bri, 'current_sat'=>$cur_sat, 'current_hue'=>$cur_hue});
 		} else {
-			# turn it off, unless it was in an altered state
-			### if (exists($lights{'previous'}{$light}{'altered'}) and ($lights{'previous'}{$light}{'altered'} eq 'yes')) {
-			###	printt (" LIGHT$light ($name) not changed\n");
-			### } elsif ($cur_onoff eq 'true') {	
-			if ($cur_onoff eq 'true') {	
+			# if the light was previously on, turn it off
+			if (exists($lights{'previous'}{$light}{'on'}) and ($lights{'previous'}{$light}{'on'} > 0)) {	
 				light_adjust($light,'false',0,0,0);
-				printt (" LIGHT$light ($name) turned off\n");
-				### $lights{'previous'}{$light}{'altered'} = 'no';
-			} else {	
-				printt (" LIGHT$light ($name) remains off\n");
+				printt ("LIGHT$light ($name) turned off\n");
 			}	
-			
-			# prevent the daemon from turning off a light that was adjusted
-			### if (exists($lights{'previous'}{$light}{'brightness'}) and 
-			###	(($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
-			###	 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
-			###	 ($cur_hue != $lights{'previous'}{$light}{'hue'}) or
-			###	 ($cur_onoff eq 'true'))) {
-			###	$lights{'previous'}{$light}{'altered'} = 'yes';
-			### }	
 		}
 		# store the current values as previous
 		$lights{'previous'}{$light}{'brightness'} = $bri;
 		$lights{'previous'}{$light}{'saturation'} = $sat;
-		$lights{'previous'}{$light}{'hue'} = $hue;
+		$lights{'previous'}{$light}{'hue'}        = $hue;
+		$lights{'previous'}{$light}{'on'}         = $on;
 	}
 }
 
@@ -664,7 +655,7 @@ sub get_cloudiness() {
 		if ($clouds != -1) {
 			$return_value = $clouds;
 		}	
-		printt (" -- clouds : $return_value\n");			
+		printt ("CLOUDS: $return_value\n");			
 	} else {
 		# curl not ok
 		printt (" !! curl to $open_weather_map_url failed\n");
@@ -988,11 +979,13 @@ $i_caught_a_signal=0;
 # if we get here, starting probably worked ;)
 # write the PID and some stuff to state file
 update_state_file('update');
+printt ("Waiting for first trigger (10 seconds)\n");
 
 while ($i_should_run) {
 	# wait 10 seconds -> run_schedule_check every 10 seconds.
 	# later on the minute is checked to prevent
 	# running multiple times during the same minute.
+	# this results in the check always running somewhere during the beginning (10 secs) of the minute.
 	select (undef,undef,undef,10);
 
 	# what is now?
