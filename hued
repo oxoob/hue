@@ -8,6 +8,10 @@
 # TODO: make randomization of start/end times possible 
 # TODO: make the push messages more descriptive (start + end values)
 
+# NOTE: the check if DB actions are wanted is done inside the functions that interact with the DB
+#       this is to avoid cluttering when calling the functions, at the expense of actually calling
+#       the functions.
+
 # use clauses
 use strict;
 use POSIX;
@@ -78,6 +82,7 @@ sub open_hue_file($) {
 	}	
 }
 
+# NOTE: all DB fcuntions operate on global dbh
 # RC1 = ok, RC0 = not
 sub connect_database() {
 	# bail out if DB is not to be used, no error
@@ -95,7 +100,6 @@ sub connect_database() {
 	}
 }	
 
-# operates on global dbh
 # RC1 = ok, RC0 = not ok
 sub log_to_database($$$) {
 	# bail out if DB is not to be used, no error
@@ -240,7 +244,7 @@ sub calculate_suncycle($) {
 	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
-	my $length  = int(5 + 50 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	my $length  = int(5 + 30 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
 	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
 
 	# night
@@ -266,7 +270,7 @@ sub calculate_suncycle($) {
 		$$suncycle_ref{$minute} = 100;
 	}
 
-	# update the database
+	# update the database, clean it first
 	truncate_table('sun');
 	my $query = "INSERT INTO `sun` (time,percentage) VALUES";
 	for (my $minute = 0; $minute <= 1440; $minute++) {
@@ -286,8 +290,7 @@ sub calculate_default_schedules() {
 	my $time;
 	my $query; 
 	my $query_a;
-	truncate_table('lights_scheduled');
-	truncate_table('lights_adjusted');
+
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 	printt ("Calculating schedules:\n");
 	# initialize a day worth of data for each light in defaults
@@ -311,6 +314,7 @@ sub calculate_default_schedules() {
 		printt (" $schedule => start : $ss ($config{'schedule'}{$schedule}{'start_time'}), end: $se ($config{'schedule'}{$schedule}{'end_time'})\n");
 		printt (" $schedule => days  : '" . join(",", @days) . "'\n");
 		
+		# verify if today is found the the days configured for this schedule
 		if (in($now_dow,\@days)) {
 			printt (" $schedule =>       day $now_dow matched - calculating..\n");
 			my $bri_adjust = 0;
@@ -318,11 +322,13 @@ sub calculate_default_schedules() {
 			my $hue_adjust = 0;
 			my $sun_adjust = 0;
 			my $wth_adjust = 0; 
-			 
+			
+			# get a configured brightness adjustment from the config
 			if (exists($config{'schedule'}{$schedule}{'brightness'})) {
 				$bri_adjust = $config{'schedule'}{$schedule}{'brightness'};
 			}	
 	
+			# do the same for the temp
 			if (exists($config{'schedule'}{$schedule}{'temperature'})) {
 				if ($config{'schedule'}{$schedule}{'temperature'} eq "warmer") {
 					$hue_adjust = -$config{'config'}{'adjust'}{'hue'};
@@ -406,7 +412,10 @@ sub calculate_default_schedules() {
 		}	
 	}
 
-	# dump to database
+	# dump schedules to database, cleanup first
+	truncate_table('lights_scheduled');
+	truncate_table('lights_adjusted');
+
         $query   = "INSERT INTO `lights_scheduled` (primary_key,time,light,scheduled_bri,scheduled_sat,scheduled_hue) VALUES";
         $query_a = "INSERT INTO `lights_adjusted` (primary_key,time,light,adjusted_bri,adjusted_sat,adjusted_hue) VALUES";
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
@@ -431,13 +440,13 @@ sub smooth_default_schedules() {
 	my $date = sprintf("%04d-%02d-%02d",$now_year + 1900, $now_month + 1, $now_day);
 	my $time;
 	my $query;
+
+	# NOTE: if a period f.i. ends at 23:50 and you set a smoothing time of 15 minutes; the last 5 minutes are not smoothed.
+
+	# cleanup the appropriate table.
 	truncate_table('lights_smoothed');
 
 	printt ("Smoothing schedules:\n");
-	# initialize a day worth of data for each light in defaults
-
-	# NOTE, W.I.P.: do a smoothing pass on the default schedule
-	# another NOTE: if a period f.i. ends at 23:50 and you set a smoothing time of 15 minutes; the last 5 minutes are not smoothed.
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		# process a whole day
 		printt("Smoothing light $light\n");
@@ -526,10 +535,6 @@ sub run_schedule_check() {
 		my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
 		my $bri_adjust = 0;
 
-		#### anthing adding to minimizing external calls hashed out ####
-		#### # get current values
-		#### my ($cur_rc, $cur_onoff, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
-
 		# $on -> 0 = off
 		#     -> 1 = on
 		#     -> 2 = reset
@@ -554,7 +559,6 @@ sub run_schedule_check() {
 			# possible states and the expected result, in order of precedence
 			# - override (on restart/reset of hued) -> always change
 			# - reset (on starts of new periods)    -> always change
-			# - customized externally               -> never change 
 			# - suncycle                            -> change
 			# - smoothing                           -> change
 			# - in other cases                      -> no change
@@ -568,11 +572,6 @@ sub run_schedule_check() {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				printt ("LIGHT$light ($name) reset to $bri/$sat/$hue\n");
 				#### pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
-			#### # has the light changed beyond our control?	
-			#### } elsif (($cur_bri != $lights{'previous'}{$light}{'brightness'}) or
-			####	 ($cur_sat != $lights{'previous'}{$light}{'saturation'}) or
-			####	 ($cur_hue != $lights{'previous'}{$light}{'hue'})) {
-			####	printt (" LIGHT$light ($name) not adjusted (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 			# are we in sun cycle adjustments?
 			} elsif ($on == 4) {
 				light_adjust($light,'true',$bri,$sat,$hue);
@@ -581,13 +580,7 @@ sub run_schedule_check() {
 			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				printt ("LIGHT$light ($name) smoothing to $bri/$sat/$hue\n");
-			#### } else {
-			####	printt ("LIGHT$light ($name) on (current: $cur_bri/$cur_sat/$cur_hue, wanted: $bri/$sat/$hue)\n");
 			}	
-
-			#### log_to_database('lights',$db_stamp, {	'primary_key'=>"$db_stamp $light", 'light'=>$light, 
-			####					'set_bri'=>$bri, 'set_sat'=>$sat, 'set_hue'=>$hue, 
-			####					'current_bri'=>$cur_bri, 'current_sat'=>$cur_sat, 'current_hue'=>$cur_hue});
 		} else {
 			# if the light was previously on, turn it off
 			if (exists($lights{'previous'}{$light}{'on'}) and ($lights{'previous'}{$light}{'on'} > 0)) {	
@@ -624,8 +617,7 @@ sub light_current($) {
 	}	
 }	
 	
-# RC 1 = ok
-# RC 0 = not ok
+# RC1 = ok, RC0 = not ok
 sub light_adjust($$$$$) {
 	my $light      = shift;
 	my $onoff      = shift;
@@ -677,7 +669,6 @@ sub curl_hue($$;$) {
 	return ($curl_RC, $curl_output);
 }	
 	
-	
 # does something with the sun
 sub get_suncycle($) {
 	my $stamp  = shift; # now
@@ -689,17 +680,12 @@ sub get_suncycle($) {
 # dummy for testing
 sub get_cloudiness_testing() {
 	my $clouds = 33;
-
 	open(CL,"<clouds") or die ("$? - $!");
 	while (<CL>) {
-		if ($_ =~ /clouds:\s*(\d+)/) {
-			$clouds = $1;
-		}	
+		$clouds = $1 if ($_ =~ /clouds:\s*(\d+)/);
 	}
 	close(CL);
-
 	printt ("clouds: $clouds\n");			
-
 	return $clouds;
 }	
 	
@@ -852,6 +838,7 @@ sub self_clean_log() {
 
 # operates on global dbh
 # RC1 = ok, RC0 = not ok
+# NOTE: at this moment the usefulness of this function is unknown, but it can be expanded if needed.
 sub self_clean_database() {
 	# bail out if DB is not to be used, no error
 	if ($config{'config'}{'db'}{'use'} eq "no") {
@@ -862,16 +849,6 @@ sub self_clean_database() {
 	my @tables = ('sun','weather','lights_adjusted','lights_scheduled','lights_smoothed');
 	
 	foreach my $table (@tables) {
-		## $query = "DELETE  FROM `$table` WHERE unix_timestamp() - unix_timestamp(`datetime`) > 172800";
-		## if (my $sth = $dbh->prepare($query)) {
-		##	if (not $sth->execute) {
-		##		printt ("DB execute (cleanup $table):\n$DBI::errstr\n");
-		##		$result = 0;
-		##	}
-		## } else {
-		##	printt ("DB prepare (cleanup $table):\n$DBI::errstr\n");
-		##	$result = 0;
-		## }	
 		# defrag
 		$query = "ALTER TABLE `$table` ENGINE = InnoDB";
 		if (my $sth = $dbh->prepare($query)) {
@@ -886,17 +863,6 @@ sub self_clean_database() {
 	}
 	return $result;
 }
-
-sub kill_child() {
-	my $count = 0;
-	$count = kill ("TERM", $child_pid);
-	if ($count > 0) {
-		printt ("command with PID $child_pid, killed due to timeout\n");
-	} else {	
-		printt ("command with PID $child_pid, failed to be killed\n");
-	}	
-}
-
 
 # mail me some stuff
 sub mail_info($$) {
@@ -963,6 +929,17 @@ sub signal_usr1 {
 	$i_caught_a_signal = 1;
 	$override = 1;
 } 
+
+sub kill_child() {
+	my $count = 0;
+	$count = kill ("TERM", $child_pid);
+	if ($count > 0) {
+		printt ("command with PID $child_pid, killed due to timeout\n");
+	} else {	
+		printt ("command with PID $child_pid, failed to be killed\n");
+	}	
+}
+
 
 # loads config, but empties it first
 sub load_config() {
