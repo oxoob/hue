@@ -300,7 +300,6 @@ sub calculate_default_schedules() {
 			$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = 0;
 			$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'};
 			$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'};
-			$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = 0;
 			$lights{'schedules'}{$light}{$stamp}{'on'}           = 0;
 		}	
 	}	
@@ -321,7 +320,6 @@ sub calculate_default_schedules() {
 			my $sat_adjust = 0;
 			my $hue_adjust = 0;
 			my $sun_adjust = 0;
-			my $wth_adjust = 0; 
 			
 			# get a configured brightness adjustment from the config
 			if (exists($config{'schedule'}{$schedule}{'brightness'})) {
@@ -343,10 +341,6 @@ sub calculate_default_schedules() {
 				$sun_adjust = 1;
 			}
 
-			if (exists($config{'schedule'}{$schedule}{'use_weather'}) and ($config{'schedule'}{$schedule}{'use_weather'} eq 'yes')) {
-				$wth_adjust = 1;
-			}
-
 			# normally end is bigger (later) than start
 			# if not (-> else) assume it crosses midnight and then it needs to be split up
 			if ($se > $ss) {
@@ -365,7 +359,6 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
 				}	
@@ -386,7 +379,6 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
 					# post-midnight
@@ -404,7 +396,6 @@ sub calculate_default_schedules() {
 						$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'} + $sat_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'hue'}          = $config{'lights_defaults'}{$light}{'hue'} + $hue_adjust;
-						$lights{'schedules'}{$light}{$stamp}{'use_weather'}  = $wth_adjust;
 						$lights{'schedules'}{$light}{$stamp}{'on'} = $on;
 					}	
 				}
@@ -532,7 +523,7 @@ sub run_schedule_check() {
 		my $bri = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
 		my $sat = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
 		my $hue = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
-		my $wth = $lights{'schedules'}{$light}{$stamp}{'use_weather'};
+		my $wth = $config{'lights_defaults'}{$light}{'use_weather'};
 		my $bri_adjust = 0;
 
 		# $on -> 0 = off
@@ -542,7 +533,7 @@ sub run_schedule_check() {
 		# printt (" $light ($name)\n");
 		if ($on) {
 			# adjust for weather?
-			if ($wth == 1) {
+			if ($wth eq "yes") {
 				# recalculate the adjustment, using the returned % and the configured base value value
 				# also adjust for the sun, as the sun_adjust gets higher, the effect of the weather adjustment should get lower
 				my $sun_val = get_suncycle($stamp);
