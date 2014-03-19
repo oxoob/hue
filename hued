@@ -7,6 +7,7 @@
 
 # TODO: make randomization of start/end times possible 
 # TODO: make the push messages more descriptive (start + end values)
+# TODO: smooth cloudiness adjustments
 
 # NOTE: the check if DB actions are wanted is done inside the functions that interact with the DB
 #       this is to avoid cluttering when calling the functions, at the expense of actually calling
@@ -244,31 +245,47 @@ sub calculate_suncycle($) {
 	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
-	my $length  = int(5 + 30 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	my $length  = int(5 + 40 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
 	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
 
 	# night
-	for (my $minute = 0; $minute < int($sunrise - $length/2); $minute++) {
+	printt ("Night:\n");
+	for (my $minute = 0; $minute < int($sunrise - $length/3); $minute++) {
 		$$suncycle_ref{$minute} = 100;
+		print "$$suncycle_ref{$minute} ";
 	}
+	print "\n";
 	# sunrise
-	for (my $minute = int($sunrise - $length/2); $minute < int($sunrise + $length/2); $minute++) {
-		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/2))/$length * 3.1415)); 
+	printt ("Sunrise:\n");
+	for (my $minute = int($sunrise - $length/3); $minute < int($sunrise + $length/3 * 2); $minute++) {
+		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/3))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
+		print "$$suncycle_ref{$minute} ";
 	}	
+	print "\n";
 	# day
-	for (my $minute = int($sunrise + $length/2); $minute < int($sunset - $length/2); $minute++) {
+	printt ("Day:\n");
+	for (my $minute = int($sunrise + $length/3 * 2); $minute < int($sunset - $length/3 * 2); $minute++) {
 		$$suncycle_ref{$minute} = 0;
+		print "$$suncycle_ref{$minute} ";
 	}
+	print "\n";
 	# sunset
-	for (my $minute = int($sunset - $length/2); $minute < int($sunset + $length/2); $minute++) {
-		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/2))/$length * 3.1415)); 
+	printt ("Sunset:\n");
+	for (my $minute = int($sunset - $length/3 * 2); $minute < int($sunset + $length/3); $minute++) {
+		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/3 * 2))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
+		print "$$suncycle_ref{$minute} ";
 	}	
+	print "\n";
 	# night
-	for (my $minute = int($sunset + $length/2); $minute <= 1440; $minute++) {
+	printt ("Night:\n");
+	for (my $minute = int($sunset + $length/3); $minute <= 1440; $minute++) {
 		$$suncycle_ref{$minute} = 100;
+		print "$$suncycle_ref{$minute} ";
 	}
+	print "\n";
+	printt ("Done\n");
 
 	# update the database, clean it first
 	truncate_table('sun');
@@ -942,7 +959,7 @@ sub load_config() {
 	$config{'config'}{'logging'}{'hue_state'} = "/var/log/hue/hued.state";
   
   	# open the config file (in same dir as daemon - for now)
-	open_hue_file("hue.conf");
+	open_hue_file("/usr/local/etc/hue.conf");
 }	
 	
 # output redirection
