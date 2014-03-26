@@ -1064,8 +1064,8 @@ while ($i_should_run) {
 	# that means only trigger when the minute has changed
 	if ($now_minute != $last_minute) {
 		# printt ("MARK ----\n");
-		# every 10 minutes (but on the third minute), update clouds value
-		if ($now_minute % 10 == 3) {
+		# every 10 minutes (but on the third minute), update clouds value, unless the sun is down
+		if (($now_minute % 10 == 3) and (get_suncycle(mins("$now_hour:$now_minute")) < 100)) {
 			$clouds = get_cloudiness();
 		}	
 		run_schedule_check();
