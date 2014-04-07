@@ -32,6 +32,7 @@ $Data::Dumper::Sortkeys = sub {[sort {$a <=> $b} keys %{$_[0]}]};
 my %config;
 my %lights;
 my %suncycle;
+my %tsv;
 my $hue;
 my $clouds; # global var for storing cloudiness (so it does not have to be checked all the time)
 my $dbh; # global database handler
@@ -240,6 +241,7 @@ sub by_start_time {
 sub calculate_suncycle($) {
 	my $suncycle_ref = shift;
 	my $time;
+	my $stime;
 	my $rise    = sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
 	my $sunrise = int(mins($rise));
 	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
@@ -292,6 +294,8 @@ sub calculate_suncycle($) {
 	my $query = "INSERT INTO `sun` (time,percentage) VALUES";
 	for (my $minute = 0; $minute <= 1440; $minute++) {
 		$time = snim($minute);
+		$stime = substr($time,0,5);
+		$tsv{"$stime"} = "$$suncycle_ref{$minute}	";
 		$query .= "('$time','$$suncycle_ref{$minute}'),";
 	}		
 	$query =~ s/,$//g;
@@ -305,6 +309,7 @@ sub calculate_default_schedules() {
 	%lights = ();
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	my $time;
+	my $stime;
 	my $query; 
 	my $query_a;
 
@@ -439,6 +444,18 @@ sub calculate_default_schedules() {
 	log_query_to_database($query);
 	$query_a =~ s/,$//g;
 	log_query_to_database($query_a);
+	for (my $stamp = 0; $stamp <= 1440; $stamp++) {
+		foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+			$time = snim($stamp);
+			$stime = substr($time,0,5);
+			$tsv{"$stime"} .= "$lights{'schedules'}{$light}{$stamp}{'brightnessx'}	";
+		}
+		foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+			$time = snim($stamp);
+			$stime = substr($time,0,5);
+			$tsv{"$stime"} .= "$lights{'schedules'}{$light}{$stamp}{'brightness'}	";
+		}
+	}	
 }
 
 # do the smoothing
@@ -447,6 +464,7 @@ sub smooth_default_schedules() {
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	my $date = sprintf("%04d-%02d-%02d",$now_year + 1900, $now_month + 1, $now_day);
 	my $time;
+	my $stime;
 	my $query;
 
 	# NOTE: if a period f.i. ends at 23:50 and you set a smoothing time of 15 minutes; the last 5 minutes are not smoothed.
@@ -523,6 +541,28 @@ sub smooth_default_schedules() {
 		}	
 	}	
 	printt ("Smoothing done\n");
+	for (my $stamp = 0; $stamp <= 1440; $stamp++) {
+		foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+			$time = snim($stamp);
+			$stime = substr($time,0,5);
+			$tsv{"$stime"} .= "$lights{'schedules'}{$light}{$stamp}{'bri_smooth'}	";
+		}
+	}	
+}
+
+sub update_tsv_files() {
+	if (open (TSV,">$config{'config'}{'tsv'}{'location'}lights.tsv")) {
+		printt("Dumping TSV file ($config{'config'}{'tsv'}{'location'}lights.tsv)\n");
+		print TSV "time	sun	light1_schedule	light2_schedule	light3_schedule	light1_adjusted	light2_adjusted	light3_adjusted	";
+		print TSV "light1_smoothed	light2_smoothed	light3_smoothed\n";
+
+		foreach my $time (sort keys(%tsv)) {
+			print TSV "$time	" . $tsv{$time} . "\n";
+		}
+		close (TSV);
+	} else {
+		printt("Failed to dump TSV file ($config{'config'}{'tsv'}{'location'}lights.tsv)\n");
+	}
 }
 
 # run_schedule_check; this run_schedule_checks on the timer and does matching and processing
@@ -1034,6 +1074,7 @@ if (not connect_database()) {
 calculate_suncycle(\%suncycle);
 calculate_default_schedules();
 smooth_default_schedules();
+update_tsv_files();
 ## for debugging the flow of values
 # open (D,">dump");
 # print D Dumper(\%{$lights{'schedules'}{1}});
@@ -1077,6 +1118,7 @@ while ($i_should_run) {
 			calculate_suncycle(\%suncycle);
 			calculate_default_schedules();
 			smooth_default_schedules();
+			update_tsv_files();
 		}	
 		$last_minute = $now_minute;
 		# reset override
@@ -1089,6 +1131,7 @@ while ($i_should_run) {
 		calculate_suncycle(\%suncycle);
 		calculate_default_schedules();
 		smooth_default_schedules();
+		update_tsv_files();
 	}
 	
 	$i_should_reload_config=0;
@@ -1099,6 +1142,5 @@ while ($i_should_run) {
 update_state_file('empty');
 printt ("hued ended succesfully, PID: $$\n");
 exit 0;
-
 
 # bye now
