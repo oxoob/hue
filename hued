@@ -247,19 +247,19 @@ sub calculate_suncycle($) {
 	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
-	my $length  = int(5 + 40 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
-	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set)\n");
+	my $length  = int(20 + 140 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set) - transition length: $length\n");
 
 	# night
 	printt ("Night:\n");
-	for (my $minute = 0; $minute < int($sunrise - $length/3); $minute++) {
+	for (my $minute = 0; $minute < int($sunrise - $length/4); $minute++) {
 		$$suncycle_ref{$minute} = 100;
 		print "$$suncycle_ref{$minute} ";
 	}
 	print "\n";
 	# sunrise
 	printt ("Sunrise:\n");
-	for (my $minute = int($sunrise - $length/3); $minute < int($sunrise + $length/3 * 2); $minute++) {
+	for (my $minute = int($sunrise - $length/4); $minute < int($sunrise + $length/4 * 3); $minute++) {
 		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/3))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
 		print "$$suncycle_ref{$minute} ";
@@ -267,14 +267,14 @@ sub calculate_suncycle($) {
 	print "\n";
 	# day
 	printt ("Day:\n");
-	for (my $minute = int($sunrise + $length/3 * 2); $minute < int($sunset - $length/3 * 2); $minute++) {
+	for (my $minute = int($sunrise + $length/4 * 3); $minute < int($sunset - $length/4 * 3); $minute++) {
 		$$suncycle_ref{$minute} = 0;
 		print "$$suncycle_ref{$minute} ";
 	}
 	print "\n";
 	# sunset
 	printt ("Sunset:\n");
-	for (my $minute = int($sunset - $length/3 * 2); $minute < int($sunset + $length/3); $minute++) {
+	for (my $minute = int($sunset - $length/4 * 3); $minute < int($sunset + $length/4); $minute++) {
 		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/3 * 2))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
 		print "$$suncycle_ref{$minute} ";
@@ -282,7 +282,7 @@ sub calculate_suncycle($) {
 	print "\n";
 	# night
 	printt ("Night:\n");
-	for (my $minute = int($sunset + $length/3); $minute <= 1440; $minute++) {
+	for (my $minute = int($sunset + $length/4); $minute <= 1440; $minute++) {
 		$$suncycle_ref{$minute} = 100;
 		print "$$suncycle_ref{$minute} ";
 	}
@@ -503,7 +503,7 @@ sub smooth_default_schedules() {
 			$lights{'schedules'}{$light}{$stamp}{'sat_smooth'} = $sat_result;
 			$lights{'schedules'}{$light}{$stamp}{'hue_smooth'} = $hue_result;
 			# if the average is not the same as the current value, we're smoothing
-			# but: keep the reset (on = 2) in tact to make the daemon tak control every new period
+			# but: keep the reset (on = 2) in tact to make the daemon take control every new period
 			if (($bri_result != $lights{'schedules'}{$light}{$stamp}{'brightness'}) or
 			    ($sat_result != $lights{'schedules'}{$light}{$stamp}{'saturation'}) or
 			    ($hue_result != $lights{'schedules'}{$light}{$stamp}{'hue'})) {
@@ -583,10 +583,25 @@ sub run_schedule_check() {
 		my $wth = $config{'lights_defaults'}{$light}{'use_weather'};
 		my $bri_adjust = 0;
 
+		# if the settings of the light have changed since our last pass, it has been adjusted externally and it should be left alone
+		# note that the pre* values are the calculated values, this is to ensure that the light be left alone;
+		# if the the pre* values were set to the currently set values, it would not register as modified anymore after 1 pass.
+		my $pre_bri = $lights{'previous'}{$light}{'brightness'};
+		my $pre_sat = $lights{'previous'}{$light}{'saturation'};
+		my $pre_hue = $lights{'previous'}{$light}{'hue'};
+		my $pre_onf = $lights{'previous'}{$light}{'on'};
+		my ($ok, $cur_onf, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
+		if ($ok and (($cur_bri != $pre_bri) or ($cur_sat != $pre_sat) or ($cur_hue != $pre_hue) or ($cur_onf != $pre_onf))) {
+			# tweaking the system
+			$on = 5 unless ($on == 2);
+		}	
+
 		# $on -> 0 = off
 		#     -> 1 = on
 		#     -> 2 = reset
 		#     -> 3 = smooth
+		#     -> 4 = sun adjust
+		#     -> 5 = leave alone
 		# printt (" $light ($name)\n");
 		if ($on) {
 			# adjust for weather?
@@ -606,16 +621,22 @@ sub run_schedule_check() {
 
 			# possible states and the expected result, in order of precedence
 			# - override (on restart/reset of hued) -> always change
+			# - when externally adjusted            -> no change
 			# - reset (on starts of new periods)    -> always change
 			# - suncycle                            -> change
 			# - smoothing                           -> change
 			# - in other cases                      -> no change
 			# for logging purposes the adjust value is also used to reflect what kind of action was taken, 
 
+			# TODO: consider taking out the forced reset when a new period starts, and move it to the config
+			# TODO: for instance, make a setting to force at the beginning or the end of a period or not at all.
+
 			# reset or override needed? - separated these choices
 			if ($override) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				printt ("LIGHT$light ($name) overridden to $bri/$sat/$hue\n");
+			} elsif ($on == 5) {
+				# do nothing to the light
 			} elsif ($on == 2) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				printt ("LIGHT$light ($name) reset to $bri/$sat/$hue\n");
@@ -657,6 +678,9 @@ sub light_current($) {
 	($saturation) = ($curl_output =~ m/"sat":\s*(\d+)\s*/);
 	($hue)        = ($curl_output =~ m/"hue":\s*(\d+)\s*/);
 	($onoff)      = ($curl_output =~ m/"on":\s*(\w+)\s*/);
+	# rude conversion
+	$onoff = 1 if ($onoff eq 'true');
+	$onoff = 0 if ($onoff eq 'false');
 	# everything has to be in order:
 	if (($curl_returncode == 0) and ($brightness > -1) and ($saturation > -1) and ($hue > -1)) {
 		return (1, $onoff, $brightness, $saturation, $hue);
