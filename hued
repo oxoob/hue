@@ -73,7 +73,16 @@ sub open_hue_file($) {
 				$key_B = $1;
 			}	
 			if ($line =~ /^\s*(\S+)\s*=\s*(.*)\s*$/) {
-				$config{$key_A}{$key_B}{$1} = $2;
+				my $val = $2;
+				if ($val eq 'sunrise') {
+					my $length  = int(150 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+					$val = snim(mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})) + ($length/4)*3);
+				}
+				if ($val eq 'sunset') {
+					my $length  = int(150 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+					$val = snim(mins(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})) - ($length/4)*3);
+				}
+				$config{$key_A}{$key_B}{$1} = $val;
 				$config{$key_A}{$key_B}{$1} =~ s/\s+$//g; # strip whitespace at the end
 				# print ("Added to config : $key_A - $key_B -> $1 => $2\n");
 			}
@@ -247,7 +256,7 @@ sub calculate_suncycle($) {
 	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
-	my $length  = int(20 + 140 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
+	my $length  = int(150 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
 	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set) - transition length: $length\n");
 
 	# night
@@ -260,7 +269,7 @@ sub calculate_suncycle($) {
 	# sunrise
 	printt ("Sunrise:\n");
 	for (my $minute = int($sunrise - $length/4); $minute < int($sunrise + $length/4 * 3); $minute++) {
-		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/3))/$length * 3.1415)); 
+		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/4))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
 		print "$$suncycle_ref{$minute} ";
 	}	
@@ -275,7 +284,7 @@ sub calculate_suncycle($) {
 	# sunset
 	printt ("Sunset:\n");
 	for (my $minute = int($sunset - $length/4 * 3); $minute < int($sunset + $length/4); $minute++) {
-		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/3 * 2))/$length * 3.1415)); 
+		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/4 * 3))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
 		print "$$suncycle_ref{$minute} ";
 	}	
@@ -374,7 +383,11 @@ sub calculate_default_schedules() {
 							# get the adjustement for sun cycle (%)
 							my $sun_val = get_suncycle($stamp);
 							# recalculate the adjustment, using the returned % and the configured base value value
-							$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							if (defined($config{'schedule'}{$schedule}{'sunfluence'})) {
+								$sun_add = int($config{'schedule'}{$schedule}{'sunfluence'} * ($sun_val / 100));
+							} else {
+								$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							}	
 							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
 						}	
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
@@ -394,7 +407,11 @@ sub calculate_default_schedules() {
 							# get the adjustement for sun cycle (%)
 							my $sun_val = get_suncycle($stamp);
 							# recalculate the adjustment, using the returned % and the configured base value value
-							$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							if (defined($config{'schedule'}{$schedule}{'sunfluence'})) {
+								$sun_add = int($config{'schedule'}{$schedule}{'sunfluence'} * ($sun_val / 100));
+							} else {
+								$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							}	
 							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
 						}	
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
@@ -411,7 +428,11 @@ sub calculate_default_schedules() {
 							# get the adjustement for sun cycle (%)
 							my $sun_val = get_suncycle($stamp);
 							# recalculate the adjustment, using the returned % and the configured base value value
-							$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							if (defined($config{'schedule'}{$schedule}{'sunfluence'})) {
+								$sun_add = int($config{'schedule'}{$schedule}{'sunfluence'} * ($sun_val / 100));
+							} else {
+								$sun_add = int($config{'config'}{'adjust'}{'sun'} * ($sun_val / 100));
+							}	
 							$on = 4 if (($sun_val > 0) and ($sun_val < 100));
 						}	
 						$lights{'schedules'}{$light}{$stamp}{'brightness'}   = $config{'lights_defaults'}{$light}{'brightness'} + $bri_adjust + $sun_add;
@@ -638,7 +659,7 @@ sub run_schedule_check() {
 			} elsif ($on == 2) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 				printt ("LIGHT$light ($name) reset to $bri/$sat/$hue\n");
-				#### pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onoff\nTo: $bri $sat $hue on:true","0");
+				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onf\nTo: $bri $sat $hue on:true","0");
 			# are we in sun cycle adjustments?
 			} elsif ($on == 5) {
 				# do nothing to the light
