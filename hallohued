@@ -1,0 +1,323 @@
+#!/usr/bin/perl -w 
+
+# hallohued, 2014
+# a daemon to control a bunch of philips hue lights on hallohue
+# License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
+# https://github.com/oxoob/hallowhue
+
+# use clauses
+use strict;
+use POSIX;
+use File::stat;
+use File::Copy;
+use Math::Round;
+use DateTime;
+
+# global variables
+my %config;
+
+# daemon control variables
+my $i_should_run;
+my $i_should_reload_config;
+my $i_caught_a_signal;
+my $last_minute = 99; # initialize to an impossible value 
+my $pid;
+my $child_pid;
+my $timeout = 20;
+
+# external commands
+my $curl = "/usr/bin/curl"; 
+
+# read the config file  
+sub open_hallohued_file($) {
+	my $f_hue = shift;
+	my $fh_hue;
+	my $line;
+	my $key_A;
+	my $key_B;
+	printt ("Opening hue file \"$f_hue\", and loading data...\n");
+   	if (open($fh_hue, "<$f_hue")) {
+        	while ($line = readline($fh_hue)) {
+			chomp($line);
+			$line =~ s/\s*#.*//; # remove comments
+			if ($line =~ /^\[(\S+)\]\s*$/) {
+				$key_A = $1;
+			}	
+			if ($line =~ /^\s*(\S+):\s*$/) {
+				$key_B = $1;
+			}	
+			if ($line =~ /^\s*(\S+)\s*=\s*(.*)\s*$/) {
+				my $val = $2;
+				$config{$key_A}{$key_B}{$1} = $val;
+				$config{$key_A}{$key_B}{$1} =~ s/\s+$//g; # strip whitespace at the end
+				# print ("Added to config : $key_A - $key_B -> $1 => $2\n");
+			}
+		}
+      close $fh_hue;
+   } else {
+		printt ("No config file found, running empty\n");
+	}	
+}
+
+# search a value in an array, both numerical as alfa
+sub in($$) {
+	my $search  = shift;
+	my $arr_ref = shift;
+	foreach (@$arr_ref) {
+		return 1 if ($search eq $_);
+		return 1 if ($search == $_);
+	}
+	return 0;
+}	
+
+# minmax, prevent a value for exceeding the given minimum or maximum
+sub minmax($$$) {
+	my $val_ref = shift;
+	my $min = shift;
+	my $max = shift;
+	$$val_ref = $min if ($$val_ref < $min);
+	$$val_ref = $max if ($$val_ref > $max);
+}	
+
+# determine if the supplied value is psositiv or negative, returns -1 or 1
+# for integer values this should work fine.
+sub posneg($) {
+	my $value = shift;
+	# prevent div by 0
+	if ($value != 0) {
+		return ($value / abs($value));
+	} else {
+		return 1; # 
+	}	
+}	
+
+# process_lights; this process_lights on the timer and does matching and processing
+sub process_lights() {
+	# get the needed parameters into single variables
+	my $stamp = time();
+
+	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
+		my $name      = $config{'lights_defaults'}{$light}{'name'};
+		my $base_bri  = $config{'lights_defaults'}{$light}{'brightness'};
+		my $base_sat  = $config{'lights_defaults'}{$light}{'saturation'};
+		my $base_hue  = $config{'lights_defaults'}{$light}{'hue'};
+		my $cycle_len = $config{'lights_defaults'}{$light}{'cycle_len'};
+		my $variation = $config{'lights_defaults'}{$light}{'variation'};
+		
+		# the cycle_len in seconds should be translated to 2*PI
+		# based on the $stamp the 'position' on the 2*PI cycle can be calculated
+		my $mod = ($stamp % $cycle_len + 1);
+		my $ts  = sprintf ("%1.6f", cos($mod / $cycle_len * 6.283185));
+		my $hue = $base_hue + int($variation * $ts);
+		my $sat = $base_sat;
+		my $bri = $base_bri;
+
+		my $result = light_adjust($light,'true',$bri,$sat,$hue);
+		printt ("$light :: $stamp ($cycle_len) -> $mod -> $ts => $hue/$sat/$bri <= $result\n");
+	}
+}
+
+# RC1 = ok, RC0 = not ok
+sub light_adjust($$$$$) {
+	my $light      = shift;
+	my $onoff      = shift;
+	my $brightness = shift;
+	my $saturation = shift;
+	my $hue        = shift;
+	my $curl_data  = "{\"on\":$onoff,\"bri\":$brightness,\"sat\":$saturation,\"hue\":$hue}";
+
+	# setup a conversation to the bridge
+	my ($curl_returncode, $curl_output) = curl_hue("/lights/$light/state","PUT",$curl_data);
+	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
+	# to get a match on success. TODO
+	if ($curl_returncode == 0 and $curl_output =~ /success/) {
+		# printt (" - curl RC : $curl_returncode\n");
+		# printt (" - curl out: $curl_output\n");
+		return 1;
+	} else {	
+		# printt ("  a- light $light not adjusted\n");
+		return 0;
+	}	
+}	
+
+# talk to hue
+sub curl_hue($$;$) {
+	my $api_call  = shift; # everything after userid
+	my $curl_meth = shift;
+	my $curl_data = shift;
+	my $host = $config{'config'}{'hue'}{'hued_host'};
+	my $user = $config{'config'}{'hue'}{'hued_user'};
+	my $curl_path    = "http://$host/api/${user}${api_call}";
+	my $curl_output  = "";
+	my $curl_RC      = 1;
+	my $curl_command; 
+	
+	# a PUT of POST needs data with a -d option
+	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
+	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
+	# printt ("curl    : $curl_command\n");
+	
+	if ($child_pid = open (CO,"-|","$curl_command")) {
+		alarm($timeout);
+		while (<CO>) {
+			$curl_output .= $_;	
+		}
+		close(CO);
+		$curl_RC = $?;
+		alarm(0);
+	}
+	return ($curl_RC, $curl_output);
+}	
+	
+# RC1 = found another daemon, RC0 = no other daemon found
+sub check_running_hallohued() {
+	my $ps = "/bin/ps -C hallohued -o pid,start,cmd --no-heading";
+	my $ps_output = "";
+	my $rc = 0;
+	
+	if ($child_pid = open (PS,"-|","$ps")) {
+		alarm($timeout);
+		while (<PS>) {
+			$ps_output .= $_;	
+			my ($pid) = ($_ =~ /^\s*(\d+)\s+/);
+			$rc++ if ($pid != $$);
+		}
+		close(PS);
+		alarm(0);
+	} else {
+		return 42;
+	}	
+	printt ("check_running_hallohued => $ps_output\n") if ($rc > 0);
+	return $rc;
+}	
+
+# SIGNAL handlers
+sub signal_term {
+	printt ("### Caught TERM / INT \n");
+      	$i_should_run = 0;
+	# mail_info("hallohued ended","PID: $$")
+	# pushover("hallohued ended", "PID: $$","1")
+}
+
+sub signal_hup {
+	printt ("### Caught HUP - reloading config \n");
+	$i_should_reload_config = 1;
+	$i_caught_a_signal = 1;
+}
+
+sub signal_usr1 {
+	printt ("### Caught USR1 - enforcing light settings\n");
+	$i_caught_a_signal = 1;
+} 
+
+sub kill_child() {
+	my $count = 0;
+	$count = kill ("TERM", $child_pid);
+	if ($count > 0) {
+		printt ("command with PID $child_pid, killed due to timeout\n");
+	} else {	
+		printt ("command with PID $child_pid, failed to be killed\n");
+	}	
+}
+
+
+# loads config, but empties it first
+sub load_config() {
+	%config = ();
+
+  	# open the config file (in same dir as daemon - for now)
+	open_hallohued_file("hallohued.conf");
+}	
+	
+# output redirection
+sub set_STDOUT($) {
+	my $outfile = shift;
+	open(FOUT, ">>$outfile") || die "\nCouldn't open logfile\n";
+	*STDOUT = *FOUT;	
+	$| = 1;
+}
+
+sub set_STDERR($) {
+	my $outfile = shift;
+	open(FERR, ">>$outfile") || die "\nCouldn't open logfile\n";
+        *STDERR = *FERR;
+	$| = 1;
+}
+
+# print with a timestamp
+sub printt($) {
+	my $message=shift;
+	my ($year,$month,$day,$hour,$minute,$second) = (localtime)[5,4,3,2,1,0];
+	printf ("%04d-%02d-%02d %02d:%02d:%02d - ",$year+1900,$month+1,$day,$hour,$minute,$second);
+	print $message;
+}
+
+#--------------------------
+# main
+#--------------------------
+
+# unbuffer output
+$| = 1;
+
+load_config();
+
+printt("pre-fork PID: $$\n");
+
+# daemonize?
+if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
+	# daemonize this! (from the Perl Cookbook)
+	# fork
+	$pid = fork;
+	# exit parent
+	exit if $pid;
+	# check
+	die "Couldn't fork $!\n" unless defined($pid);
+	# diassociate from controlling terminal..
+	POSIX:setsid() or die "Can't start a new session $!\n";
+	printt ("hallohued started - DAEMON MODE - PID: $$\n");
+	if (check_running_hallohued()) {
+		printt ("hallohued terminated - another daemon found\n");
+		exit 1;
+	}
+	set_STDERR("/dev/null");
+	set_STDOUT("/dev/null");
+} else {	
+	printt ("hallohued started - CONSOLE MODE - PID: $$\n");
+}	
+# end of daemonisation
+
+# catch signals
+$SIG{INT} = $SIG{TERM} = \&signal_term;
+$SIG{HUP} = \&signal_hup;
+$SIG{USR1} = \&signal_usr1;
+$SIG{ALRM} = \&kill_child;
+
+$i_should_run=1;
+$i_should_reload_config=0;
+$i_caught_a_signal=0;
+
+# if we get here, starting probably worked ;)
+printt ("Waiting for first trigger (10 seconds)\n");
+
+while ($i_should_run) {
+	# wait 10 seconds -> process_lights every 10 seconds.
+	# later on the minute is checked to prevent
+	# running multiple times during the same minute.
+	# this results in the check always running somewhere during the beginning (10 secs) of the minute.
+	select (undef,undef,undef,20);
+	process_lights();
+
+	# now handle all other stuff that needs to be taken care of
+	if ($i_should_reload_config) {
+		load_config();
+	}
+	
+	$i_should_reload_config=0;
+	$i_caught_a_signal=0;
+
+}
+
+printt ("hallohued ended succesfully, PID: $$\n");
+exit 0;
+
+# bye now
