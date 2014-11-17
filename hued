@@ -36,6 +36,11 @@ my %tsv;
 my $hue;
 my $clouds; # global var for storing cloudiness (so it does not have to be checked all the time)
 my $dbh; # global database handler
+my $verbose = 1; # define verbose levels (as passed to printt)
+                 # 0 = off
+                 # 1 = basic
+					  # 2 = more elaborate
+					  # 3 = all
 
 # daemon control variables
 my $i_should_run;
@@ -56,12 +61,12 @@ $config{'config'}{'logging'}{'hue_state'}  = "/var/log/hue/hued.state";
 
 # read the config file  
 sub open_hue_file($) {
-        my $f_hue = shift;
-        my $fh_hue;
-        my $line;
+	my $f_hue = shift;
+	my $fh_hue;
+	my $line;
 	my $key_A;
 	my $key_B;
-	printt ("Opening hue file \"$f_hue\", and loading data...\n");
+	printt (2,"Opening hue file \"$f_hue\", and loading data...\n");
         if (open($fh_hue, "<$f_hue")) {
         	while ($line = readline($fh_hue)) {
 			chomp($line);
@@ -89,7 +94,7 @@ sub open_hue_file($) {
 		}
         	close $fh_hue;
         } else {
-		printt ("No config file found, running empty\n");
+		printt (2,"No config file found, running empty\n");
 	}	
 }
 
@@ -98,15 +103,15 @@ sub open_hue_file($) {
 sub connect_database() {
 	# bail out if DB is not to be used, no error
 	if ($config{'config'}{'db'}{'use'} eq "no") {
-		printt ("DB not used\n");
+		printt (3,"DB not used\n");
 		return 1;
 	}	
 	if ($dbh = DBI->connect("dbi:mysql:$config{'config'}{'db'}{'db'}",$config{'config'}{'db'}{'user'},$config{'config'}{'db'}{'pwd'})) {
-		printt ("DB $config{'config'}{'db'}{'db'} connected\n");
+		printt (3,"DB $config{'config'}{'db'}{'db'} connected\n");
 		return 1;
 	} else {
-		printt ("DB $config{'config'}{'db'}{'db'} NOT connected\n");
-		printt ("DB errstr: $DBI::errstr\n");
+		printt (3,"DB $config{'config'}{'db'}{'db'} NOT connected\n");
+		printt (3,"DB errstr: $DBI::errstr\n");
 		return 0;
 	}
 }	
@@ -135,11 +140,11 @@ sub log_to_database($$$) {
 	# update db
 	if (my $sth = $dbh->prepare($query)) {
 		if (not $sth->execute) {
-			printt ("DB execute: $DBI::errstr\n");
+			printt (3,"DB execute: $DBI::errstr\n");
 			$result = 0;
 		}
 	} else {
-		printt ("DB prepare: $DBI::errstr\n");
+		printt (3,"DB prepare: $DBI::errstr\n");
 		$result = 0;
 	}	
 	return $result;
@@ -158,13 +163,13 @@ sub log_query_to_database($) {
 	# update db
 	if (my $sth = $dbh->prepare($query)) {
 		if (not $sth->execute) {
-			printt ("DB execute: $DBI::errstr\n");
-			printt ("$query\n");
+			printt (3,"DB execute: $DBI::errstr\n");
+			printt (3,"$query\n");
 			$result = 0;
 		}
 	} else {
-		printt ("DB prepare: $DBI::errstr\n");
-		printt ("$query\n");
+		printt (3,"DB prepare: $DBI::errstr\n");
+		printt (3,"$query\n");
 		$result = 0;
 	}	
 	return $result;
@@ -183,11 +188,11 @@ sub truncate_table($) {
 	# update db
 	if (my $sth = $dbh->prepare($query)) {
 		if (not $sth->execute) {
-			printt ("DB execute: $DBI::errstr\n");
+			printt (3,"DB execute: $DBI::errstr\n");
 			$result = 0;
 		}
 	} else {
-		printt ("DB prepare: $DBI::errstr\n");
+		printt (3,"DB prepare: $DBI::errstr\n");
 		$result = 0;
 	}	
 	return $result;
@@ -257,46 +262,46 @@ sub calculate_suncycle($) {
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
 	my $length  = int(150 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
-	printt ("Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set) - transition length: $length\n");
+	printt (1,"Calculating suncycle. Sunrise: $sunrise ($rise) Sunset: $sunset ($set) - transition length: $length\n");
 
 	# night
-	printt ("Night:\n");
+	### printt (3,"Night:\n");
 	for (my $minute = 0; $minute < int($sunrise - $length/4); $minute++) {
 		$$suncycle_ref{$minute} = 100;
-		print "$$suncycle_ref{$minute} ";
+		### print "$$suncycle_ref{$minute} ";
 	}
-	print "\n";
+	### print "\n";
 	# sunrise
-	printt ("Sunrise:\n");
+	### printt (3,"Sunrise:\n");
 	for (my $minute = int($sunrise - $length/4); $minute < int($sunrise + $length/4 * 3); $minute++) {
 		my $val = int (50 + 50 * cos(($minute - ($sunrise - $length/4))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
-		print "$$suncycle_ref{$minute} ";
+		### print "$$suncycle_ref{$minute} ";
 	}	
-	print "\n";
+	### print "\n";
 	# day
-	printt ("Day:\n");
+	### printt (3,"Day:\n");
 	for (my $minute = int($sunrise + $length/4 * 3); $minute < int($sunset - $length/4 * 3); $minute++) {
 		$$suncycle_ref{$minute} = 0;
-		print "$$suncycle_ref{$minute} ";
+		### print "$$suncycle_ref{$minute} ";
 	}
-	print "\n";
+	### print "\n";
 	# sunset
-	printt ("Sunset:\n");
+	### printt (3,"Sunset:\n");
 	for (my $minute = int($sunset - $length/4 * 3); $minute < int($sunset + $length/4); $minute++) {
 		my $val = int (50 - 50 * cos(($minute - ($sunset - $length/4 * 3))/$length * 3.1415)); 
 		$$suncycle_ref{$minute} = $val;
-		print "$$suncycle_ref{$minute} ";
+		### print "$$suncycle_ref{$minute} ";
 	}	
-	print "\n";
+	### print "\n";
 	# night
-	printt ("Night:\n");
+	### printt (3,"Night:\n");
 	for (my $minute = int($sunset + $length/4); $minute <= 1440; $minute++) {
 		$$suncycle_ref{$minute} = 100;
-		print "$$suncycle_ref{$minute} ";
+		### print "$$suncycle_ref{$minute} ";
 	}
-	print "\n";
-	printt ("Done\n");
+	### print "\n";
+	printt (2,"Done\n");
 
 	# update the database, clean it first
 	truncate_table('sun');
@@ -323,7 +328,7 @@ sub calculate_default_schedules() {
 	my $query_a;
 
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
-	printt ("Calculating schedules:\n");
+	printt (1,"Calculating schedules:\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
@@ -341,12 +346,12 @@ sub calculate_default_schedules() {
 		my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights'});
 		my $ss = mins($config{'schedule'}{$schedule}{'start_time'});
 		my $se = mins($config{'schedule'}{$schedule}{'end_time'});
-		printt (" $schedule => start : $ss ($config{'schedule'}{$schedule}{'start_time'}), end: $se ($config{'schedule'}{$schedule}{'end_time'})\n");
-		printt (" $schedule => days  : '" . join(",", @days) . "'\n");
+		printt (2," $schedule => start : $ss ($config{'schedule'}{$schedule}{'start_time'}), end: $se ($config{'schedule'}{$schedule}{'end_time'})\n");
+		printt (2," $schedule => days  : '" . join(",", @days) . "'\n");
 		
 		# verify if today is found the the days configured for this schedule
 		if (in($now_dow,\@days)) {
-			printt (" $schedule =>       day $now_dow matched - calculating..\n");
+			printt (2," $schedule =>       day $now_dow matched - calculating..\n");
 			my $bri_adjust = 0;
 			my $sat_adjust = 0;
 			my $hue_adjust = 0;
@@ -493,10 +498,10 @@ sub smooth_default_schedules() {
 	# cleanup the appropriate table.
 	truncate_table('lights_smoothed');
 
-	printt ("Smoothing schedules:\n");
+	printt (2,"Smoothing schedules:\n");
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		# process a whole day
-		printt("Smoothing light $light\n");
+		printt (2,"Smoothing light $light\n");
         	$query   = "INSERT INTO `lights_smoothed` (primary_key,time,light,smoothed_bri,smoothed_sat,smoothed_hue) VALUES ";
 		foreach my $stamp (0..1440) {
 			# get a weighted (using a cosine curve) average for the current $stamp
@@ -561,7 +566,7 @@ sub smooth_default_schedules() {
 			delete($lights{'schedules'}{$light}{$stamp}{'hue'});
 		}	
 	}	
-	printt ("Smoothing done\n");
+	printt (2,"Smoothing done\n");
 	for (my $stamp = 0; $stamp <= 1440; $stamp++) {
 		foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 			$time = snim($stamp);
@@ -571,9 +576,31 @@ sub smooth_default_schedules() {
 	}	
 }
 
+sub signal_light($$) {
+	my $light = shift;
+	my $signal = shift;
+	my ($ok, $cur_onf, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
+
+	if ($signal eq "green_ping") {
+		light_ping($light,'true',250,250,26000);
+		select (undef,undef,undef,1.0);
+	} elsif ($signal eq "blue_ping") {
+		light_ping($light,'true',250,250,47000);
+		select (undef,undef,undef,1.0);
+	} elsif ($signal eq "red_ping") {
+		light_ping($light,'true',250,250,65000);
+		select (undef,undef,undef,1.0);
+	} elsif ($signal eq "orange_ping") {
+		light_ping($light,'true',250,250,8000);
+		select (undef,undef,undef,1.0);
+	}		
+
+	light_adjust($light,$cur_onf,$cur_bri,$cur_sat,$cur_hue);
+}	
+
 sub update_tsv_files() {
 	if (open (TSV,">$config{'config'}{'tsv'}{'location'}lights.tsv")) {
-		printt("Dumping TSV file ($config{'config'}{'tsv'}{'location'}lights.tsv)\n");
+		printt (3,"Dumping TSV file ($config{'config'}{'tsv'}{'location'}lights.tsv)\n");
 		print TSV "time	sun	light1_schedule	light2_schedule	light3_schedule	light1_adjusted	light2_adjusted	light3_adjusted	";
 		print TSV "light1_smoothed	light2_smoothed	light3_smoothed\n";
 
@@ -582,7 +609,7 @@ sub update_tsv_files() {
 		}
 		close (TSV);
 	} else {
-		printt("Failed to dump TSV file ($config{'config'}{'tsv'}{'location'}lights.tsv)\n");
+		printt (3,"Failed to dump TSV file ($config{'config'}{'tsv'}{'location'}lights.tsv)\n");
 	}
 }
 
@@ -612,7 +639,7 @@ sub run_schedule_check() {
 		my $pre_hue = $lights{'previous'}{$light}{'hue'} || 0;
 		my $pre_onf = $lights{'previous'}{$light}{'on'};
 		my ($ok, $cur_onf, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
-		if (($on != 2 and not $override) and ($ok and (($cur_bri != $pre_bri) or ($cur_sat != $pre_sat) or ($cur_hue != $pre_hue) or ($cur_onf != $pre_onf)))) {
+		if ((($on != 2 and $on != 0) and not $override) and ($ok and (($cur_bri != $pre_bri) or ($cur_sat != $pre_sat) or ($cur_hue != $pre_hue)))) { 
 			# tweaking the system
 			$on = 5;
 		}	
@@ -623,7 +650,7 @@ sub run_schedule_check() {
 		#     -> 3 = smooth
 		#     -> 4 = sun adjust
 		#     -> 5 = leave alone
-		# printt (" $light ($name)\n");
+		# printt (3," $light ($name)\n");
 		if ($on) {
 			# adjust for weather?
 			if ($wth eq "yes") {
@@ -654,28 +681,31 @@ sub run_schedule_check() {
 
 			# reset or override needed? - separated these choices
 			if ($override) {
+				signal_light(2,"blue_ping");
 				light_adjust($light,'true',$bri,$sat,$hue);
-				printt ("LIGHT$light ($name) overridden to $bri/$sat/$hue\n");
+				printt (2,"LIGHT$light ($name) overridden to $bri/$sat/$hue\n");
 			} elsif ($on == 2) {
+				signal_light(2,"green_ping");
 				light_adjust($light,'true',$bri,$sat,$hue);
-				printt ("LIGHT$light ($name) reset to $bri/$sat/$hue\n");
+				printt (2,"LIGHT$light ($name) reset to $bri/$sat/$hue\n");
 				pushover("Hued: $name light updated","From: $cur_bri $cur_sat $cur_hue on:$cur_onf\nTo: $bri $sat $hue on:true","0");
 			# are we in sun cycle adjustments?
 			} elsif ($on == 5) {
+				# printt (3,"LIGHT$light ($name) not adjusted\n");
 				# do nothing to the light
 			} elsif ($on == 4) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				printt ("LIGHT$light ($name) suncycle adjustment to $bri/$sat/$hue\n");
+				printt (3,"LIGHT$light ($name) suncycle adjustment to $bri/$sat/$hue\n");
 			# are we smoothing?
 			} elsif ($on == 3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
-				printt ("LIGHT$light ($name) smoothing to $bri/$sat/$hue\n");
+				printt (3,"LIGHT$light ($name) smoothing to $bri/$sat/$hue\n");
 			}	
 		} else {
 			# if the light was previously on, turn it off
 			if (exists($lights{'previous'}{$light}{'on'}) and ($lights{'previous'}{$light}{'on'} > 0)) {	
 				light_adjust($light,'false',0,0,0);
-				printt ("LIGHT$light ($name) turned off\n");
+				printt (2,"LIGHT$light ($name) turned off\n");
 			}	
 		}
 		# store the current values as previous
@@ -724,11 +754,33 @@ sub light_adjust($$$$$) {
 	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
 	# to get a match on success. TODO
 	if ($curl_returncode == 0 and $curl_output =~ /success/) {
-		# printt (" - curl RC : $curl_returncode\n");
-		# printt (" - curl out: $curl_output\n");
+		# printt (3," - curl RC : $curl_returncode\n");
+		# printt (3," - curl out: $curl_output\n");
 		return 1;
 	} else {	
-		# printt ("  a- light $light not adjusted\n");
+		# printt (3,"  a- light $light not adjusted\n");
+		return 0;
+	}	
+}	
+
+# RC1 = ok, RC0 = not ok
+sub light_ping($$$$$) {
+	my $light      = shift;
+	my $brightness = shift;
+	my $saturation = shift;
+	my $hue        = shift;
+	my $curl_data  = "{\"on:true,bri\":$brightness,\"sat\":$saturation,\"hue\":$hue}";
+
+	# setup a conversation to the bridge
+	my ($curl_returncode, $curl_output) = curl_hue("/lights/$light/state","PUT",$curl_data);
+	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
+	# to get a match on success. TODO
+	if ($curl_returncode == 0 and $curl_output =~ /success/) {
+		# printt (3," - curl RC : $curl_returncode\n");
+		# printt (3," - curl out: $curl_output\n");
+		return 1;
+	} else {	
+		# printt (3,"  a- light $light not adjusted\n");
 		return 0;
 	}	
 }	
@@ -748,7 +800,7 @@ sub curl_hue($$;$) {
 	# a PUT of POST needs data with a -d option
 	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
 	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
-	# printt ("curl    : $curl_command\n");
+	# printt (3,"curl    : $curl_command\n");
 	
 	if ($child_pid = open (CO,"-|","$curl_command")) {
 		alarm($timeout);
@@ -778,7 +830,7 @@ sub get_cloudiness_testing() {
 		$clouds = $1 if ($_ =~ /clouds:\s*(\d+)/);
 	}
 	close(CL);
-	printt ("clouds: $clouds\n");			
+	printt (3,"clouds: $clouds\n");			
 	return $clouds;
 }	
 	
@@ -807,8 +859,8 @@ sub get_cloudiness() {
 		alarm(0);
 	}
 
-	# printt (" -- cloudscurl : $curl_command\n");
-	# printt (" -- cloudsoutput : $curl_output\n");
+	# printt (3," -- cloudscurl : $curl_command\n");
+	# printt (3," -- cloudsoutput : $curl_output\n");
 
 	if ($curl_returncode == 0) {
 		# ok
@@ -816,10 +868,10 @@ sub get_cloudiness() {
 		if ($clouds != -1) {
 			$return_value = $clouds;
 		}	
-		printt ("CLOUDS: $return_value\n");			
+		printt (3,"CLOUDS: $return_value\n");			
 	} else {
 		# curl not ok
-		printt (" !! curl to $open_weather_map_url failed\n");
+		printt (3," !! curl to $open_weather_map_url failed\n");
 	}	
 
 	log_to_database('weather',"$time",{'percentage'=>$return_value});
@@ -836,23 +888,23 @@ sub update_state_file($) {
 		if (open (SF,">$state_file")) {
 			print SF "$$ - $ts";
 			close(SF);
-			printt("State file updated ($$)\n");
+			printt (3,"State file updated ($$)\n");
 			return 1;
 		} else {
-			printt("State file updated failed\n");
+			printt (3,"State file updated failed\n");
 			return 0;
 		}	
 	} elsif ($operation eq "empty") {
 		if (open (SF,">$state_file")) {
 			close(SF);
-			printt("State file emptied ($$)\n");
+			printt (3,"State file emptied ($$)\n");
 			return 1;
 		} else {
-			printt("State file empty failed\n");
+			printt (3,"State file empty failed\n");
 			return 0;
 		}	
 	} else {
-		printt("State file unknown request\n");
+		printt (3,"State file unknown request\n");
 		return 0;
 	} 
 }
@@ -875,7 +927,7 @@ sub check_running_hued() {
 	} else {
 		return 42;
 	}	
-	printt ("check_running_hued => $ps_output\n") if ($rc > 0);
+	printt (3,"check_running_hued => $ps_output\n") if ($rc > 0);
 	return $rc;
 }	
 
@@ -918,13 +970,13 @@ sub self_clean_log() {
 				close LF;
 				# update state file to indicate self clean has run
 				if (not update_state_file('update')) {
-					printt ("WARNING: State File NOT updated\n");
+					printt (3,"WARNING: State File NOT updated\n");
 				}	
 			} else {
-				printt ("WARNING: Log file copy not ok\n");
+				printt (3,"WARNING: Log file copy not ok\n");
 			}	
 		} else {
-			printt ("WARNING: Self Cleaning FAILED\n");
+			printt (3,"WARNING: Self Cleaning FAILED\n");
 		}	
 	}
 }
@@ -946,11 +998,11 @@ sub self_clean_database() {
 		$query = "ALTER TABLE `$table` ENGINE = InnoDB";
 		if (my $sth = $dbh->prepare($query)) {
 			if (not $sth->execute) {
-				printt ("DB execute (cleanup $table):\n$DBI::errstr\n");
+				printt (3,"DB execute (cleanup $table):\n$DBI::errstr\n");
 				$result = 0;
 			}
 		} else {
-			printt ("DB prepare (cleanup $table):\n$DBI::errstr\n");
+			printt (3,"DB prepare (cleanup $table):\n$DBI::errstr\n");
 			$result = 0;
 		}	
 	}
@@ -986,7 +1038,7 @@ sub pushover($$$) {
 	my $curl_command; 
 	
 	$curl_command = "$curl -s -f -X POST -d 'title=$title' -d 'message=$message' -d 'priority=$prio' -d 'sound=gamelan' -d 'token=$token' -d 'user=$user' $url";
-	# printt ("curl    : $curl_command\n");
+	# printt (3,"curl    : $curl_command\n");
 	
 	# TODO: verify output, as requested in the pushover API documentation
 	if ($child_pid = open (CO,"-|","$curl_command")) {
@@ -998,27 +1050,27 @@ sub pushover($$$) {
 		$curl_RC = $?;
 		alarm(0);
 	}
-	# printt ("   - curl RC : $curl_RC\n");
-	# printt ("  x- curl out: $curl_output\n");
+	# printt (3,"   - curl RC : $curl_RC\n");
+	# printt (3,"  x- curl out: $curl_output\n");
 	return ($curl_RC, $curl_output);
 }	
 
 # SIGNAL handlers
 sub signal_term {
-	printt ("### Caught TERM / INT \n");
+	printt (1,"### Caught TERM / INT \n");
       	$i_should_run = 0;
 	# mail_info("Hued ended","PID: $$")
 	# pushover("Hued ended", "PID: $$","1")
 }
 
 sub signal_hup {
-	printt ("### Caught HUP - reloading config \n");
+	printt (1,"### Caught HUP - reloading config \n");
 	$i_should_reload_config = 1;
 	$i_caught_a_signal = 1;
 }
 
 sub signal_usr1 {
-	printt ("### Caught USR1 - enforcing light settings\n");
+	printt (1,"### Caught USR1 - enforcing light settings\n");
 	$i_caught_a_signal = 1;
 	$override = 1;
 } 
@@ -1027,9 +1079,9 @@ sub kill_child() {
 	my $count = 0;
 	$count = kill ("TERM", $child_pid);
 	if ($count > 0) {
-		printt ("command with PID $child_pid, killed due to timeout\n");
+		printt (2,"command with PID $child_pid, killed due to timeout\n");
 	} else {	
-		printt ("command with PID $child_pid, failed to be killed\n");
+		printt (2,"command with PID $child_pid, failed to be killed\n");
 	}	
 }
 
@@ -1062,12 +1114,15 @@ sub set_STDERR($) {
 	$| = 1;
 }
 
-# print with a timestamp
-sub printt($) {
-	my $message=shift;
-	my ($year,$month,$day,$hour,$minute,$second) = (localtime)[5,4,3,2,1,0];
-	printf ("%04d-%02d-%02d %02d:%02d:%02d - ",$year+1900,$month+1,$day,$hour,$minute,$second);
-	print $message;
+# print with a timestamp at verbosity level X
+sub printt($$) {
+	my $verbose_level = shift;
+	my $message       = shift;
+	if ($verbose_level <= $verbose) {
+		my ($year,$month,$day,$hour,$minute,$second) = (localtime)[5,4,3,2,1,0];
+		printf ("%04d-%02d-%02d %02d:%02d:%02d - ",$year+1900,$month+1,$day,$hour,$minute,$second);
+		print $message;
+	}	
 }
 
 #--------------------------
@@ -1079,7 +1134,7 @@ $| = 1;
 
 load_config();
 
-printt("pre-fork PID: $$\n");
+printt (3,"pre-fork PID: $$\n");
 
 # daemonize?
 if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
@@ -1092,15 +1147,15 @@ if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
 	die "Couldn't fork $!\n" unless defined($pid);
 	# diassociate from controlling terminal..
 	POSIX:setsid() or die "Can't start a new session $!\n";
-	printt ("hued started - DAEMON MODE - PID: $$\n");
+	printt (1,"hued started - DAEMON MODE - PID: $$\n");
 	if (check_running_hued()) {
-		printt ("hued terminated - another daemon found\n");
+		printt (1,"hued terminated - another daemon found\n");
 		exit 1;
 	}
 	set_STDERR($config{'config'}{'logging'}{'hue_log'});
 	set_STDOUT($config{'config'}{'logging'}{'hue_log'});
 } else {	
-	printt ("hued started - CONSOLE MODE - PID: $$\n");
+	printt (1,"hued started - CONSOLE MODE - PID: $$\n");
 }	
 # end of daemonisation
 
@@ -1112,7 +1167,7 @@ $SIG{ALRM} = \&kill_child;
 
 # rudimentary handling of DB connection
 if (not connect_database()) {
-	printt ("Program terminated, DB not connected\n");
+	printt (1,"Program terminated, DB not connected\n");
 	exit 1;
 }
 
@@ -1134,7 +1189,7 @@ $i_caught_a_signal=0;
 # if we get here, starting probably worked ;)
 # write the PID and some stuff to state file
 update_state_file('update');
-printt ("Waiting for first trigger (10 seconds)\n");
+printt (2,"Waiting for first trigger (10 seconds)\n");
 
 while ($i_should_run) {
 	# wait 10 seconds -> run_schedule_check every 10 seconds.
@@ -1149,7 +1204,7 @@ while ($i_should_run) {
 	# run_schedule_check every minute, but only once a minute
 	# that means only trigger when the minute has changed
 	if ($now_minute != $last_minute) {
-		# printt ("MARK ----\n");
+		# printt (3,"MARK ----\n");
 		# every 10 minutes (but on the third minute), update clouds value, unless the sun is down
 		if (($now_minute % 10 == 3) and (get_suncycle(mins("$now_hour:$now_minute")) < 100)) {
 			$clouds = get_cloudiness();
@@ -1185,7 +1240,7 @@ while ($i_should_run) {
 }
 
 update_state_file('empty');
-printt ("hued ended succesfully, PID: $$\n");
+printt (1,"hued ended succesfully, PID: $$\n");
 exit 0;
 
 # bye now
