@@ -36,7 +36,8 @@ my %tsv;
 my $hue;
 my $clouds; # global var for storing cloudiness (so it does not have to be checked all the time)
 my $dbh; # global database handler
-my $verbose = 1; # define verbose levels (as passed to printt)
+my $verbose = 1; # define verbose levels (as passed to printt) 
+                 # also: configurable via config..
                  # 0 = off
                  # 1 = basic
 					  # 2 = more elaborate
@@ -328,7 +329,7 @@ sub calculate_default_schedules() {
 	my $query_a;
 
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
-	printt (1,"Calculating schedules:\n");
+	printt (1,"Calculating schedules\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
@@ -1120,7 +1121,7 @@ sub printt($$) {
 	my $message       = shift;
 	if ($verbose_level <= $verbose) {
 		my ($year,$month,$day,$hour,$minute,$second) = (localtime)[5,4,3,2,1,0];
-		printf ("%04d-%02d-%02d %02d:%02d:%02d - ",$year+1900,$month+1,$day,$hour,$minute,$second);
+		printf ("%04d-%02d-%02d %02d:%02d:%02d - (%1d) - ",$year+1900,$month+1,$day,$hour,$minute,$second,$verbose_level);
 		print $message;
 	}	
 }
@@ -1133,6 +1134,9 @@ sub printt($$) {
 $| = 1;
 
 load_config();
+
+# set verbosity via config, if specified
+$verbose = $config{'config'}{'logging'}{'verbosity'} if ($config{'config'}{'logging'}{'verbosity'});
 
 printt (3,"pre-fork PID: $$\n");
 
@@ -1158,6 +1162,8 @@ if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
 	printt (1,"hued started - CONSOLE MODE - PID: $$\n");
 }	
 # end of daemonisation
+
+printt (1,"Verbosity level: $verbose\n");
 
 # catch signals
 $SIG{INT} = $SIG{TERM} = \&signal_term;
@@ -1190,6 +1196,7 @@ $i_caught_a_signal=0;
 # write the PID and some stuff to state file
 update_state_file('update');
 printt (2,"Waiting for first trigger (10 seconds)\n");
+printt (1,"Starting regular operation\n");
 
 while ($i_should_run) {
 	# wait 10 seconds -> run_schedule_check every 10 seconds.
