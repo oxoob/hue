@@ -198,7 +198,7 @@ sub calculate_default_schedules() {
 	printt (3,"phase:init - msg:calculating schedules\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
-		for (my $stamp = 0; $stamp <= 1440; $stamp++) {
+		for (my $stamp = -1; $stamp <= 1440; $stamp++) {
 			$lights{'schedules'}{$light}{$stamp}{'brightness'}   = 0;
 			$lights{'schedules'}{$light}{$stamp}{'brightnessx'}  = 0;
 			$lights{'schedules'}{$light}{$stamp}{'saturation'}   = $config{'lights_defaults'}{$light}{'saturation'};
@@ -367,14 +367,15 @@ sub smooth_default_schedules() {
 		# dump to log + determine force moments:
 		my $force_time   = mins($config{'config'}{'take_control'}{'at'});
 		foreach my $stamp (0..1440) {
-			my $name = $config{'lights_defaults'}{$light}{'name'};
-			my $on   = $lights{'schedules'}{$light}{$stamp}{'on'};
-			my $bri  = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
-			my $sat  = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
-			my $hue  = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
-			if (($on == 1) and ($force_time == $stamp)) {
+			my $name   = $config{'lights_defaults'}{$light}{'name'};
+			my $bri    = $lights{'schedules'}{$light}{$stamp}{'bri_smooth'};
+			my $sat    = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
+			my $hue    = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
+			my $on     = $lights{'schedules'}{$light}{$stamp}{'on'};
+		   my $pre_on = $lights{'schedules'}{$light}{$stamp-1}{'on'};
+			if (($on == 1) and (($force_time == $stamp) or ($pre_on == 0))) {
 				$lights{'schedules'}{$light}{$stamp}{'on'} = 2;
-			} elsif (($on == 0) and ($force_time == $stamp)) {	
+			} elsif (($on == 0) and (($force_time == $stamp) or ($pre_on == 1))) {	
 				$lights{'schedules'}{$light}{$stamp}{'on'} = -2;
 			}	
 			my $msg  = "phase:init - light:$name ($light) - stamp:$stamp - action:smoothing_final ";
@@ -403,12 +404,7 @@ sub run_schedule_check() {
 		my $wth = $config{'lights_defaults'}{$light}{'use_weather'};
 		my $bri_adjust = 0;
 		my ($ok, $cur_onf, $cur_bri, $cur_sat, $cur_hue) = light_current($light);
-		my $pre_bri = -1;
-		my $pre_sat = -1;
-		my $pre_hue = -1;
-		my $pre_onf = 999;
 
-		my $str_on  = $on;
 		# $on ->  0 = off
 		#     ->  1 = on & under control
 		#     ->  2 = take control on
@@ -453,7 +449,7 @@ sub run_schedule_check() {
 			} else {
 				light_adjust($light,'true',$bri,$sat,$hue);
 			}	
-		} elsif ($ok and ($on <= 0)) {
+		} elsif ($ok and ($on < 1)) {
 			# reset or override needed? - separated these choices
 			$action = "controlled (off)";
 			if ($on == -2) {
@@ -471,11 +467,10 @@ sub run_schedule_check() {
 			$action = "call_not_ok";
 		}	
 		my $msg  = "phase:running - light:$name ($light) - action:$action ";
-		$msg .= "- onoff:$on - cur_onoff:$cur_onf - pre_onoff:$pre_onf ";
-		$msg .= "- stored_onoff:$str_on ";
-	   $msg .= "- bri:$bri - cur_bri:$cur_bri - pre_bri:$pre_bri ";
-	   $msg .= "- sat:$sat - cur_sat:$cur_sat - pre_sat:$pre_sat ";
-		$msg .= "- hue:$hue - cur_hue:$cur_hue - pre_hue:$pre_hue ";
+		$msg .= "- onoff:$on - cur_onoff:$cur_onf ";
+	   $msg .= "- bri:$bri - cur_bri:$cur_bri ";
+	   $msg .= "- sat:$sat - cur_sat:$cur_sat ";
+		$msg .= "- hue:$hue - cur_hue:$cur_hue ";
 	   $msg .= "- suncycle:$sun_val - clouds:$clouds\n";
 		printt (2,$msg);
 	}
