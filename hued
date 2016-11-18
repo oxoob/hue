@@ -37,7 +37,7 @@ my $verbose = 3; # define verbose levels (as passed to printt)
 my $i_should_run;
 my $i_should_reload_config;
 my $i_caught_a_signal;
-my $override = 1; # when the daemon starts, make the daemon set the lights, no matter what
+my $override = 2; # when the daemon starts, make the daemon set the lights, no matter what
 my $dump_hashes = 0; # in concert with USR2
 my $last_minute = 99; # initialize to an impossible value 
 my $pid;
@@ -374,9 +374,9 @@ sub smooth_default_schedules() {
 			my $on     = $lights{'schedules'}{$light}{$stamp}{'on'};
 		   my $pre_on = $lights{'schedules'}{$light}{$stamp-1}{'on'};
 			if (($on == 1) and (($force_time == $stamp) or ($pre_on == 0))) {
-				$lights{'schedules'}{$light}{$stamp}{'on'} = 2;
+				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
 			} elsif (($on == 0) and (($force_time == $stamp) or ($pre_on == 1))) {	
-				$lights{'schedules'}{$light}{$stamp}{'on'} = -2;
+				$lights{'schedules'}{$light}{$stamp}{'on'} = -3;
 			}	
 			my $msg  = "phase:init - light:$name ($light) - stamp:$stamp - action:smoothing_final ";
 			$msg .= "- onoff:$on - bri:$bri - sat:$sat - hue:$hue \n";
@@ -407,9 +407,9 @@ sub run_schedule_check() {
 
 		# $on ->  0 = off
 		#     ->  1 = on & under control
-		#     ->  2 = take control on
+		#     ->  2 = on & externally set
 		#     ->  3 = override - on
-		#     -> -2 = take control off
+		#     -> -2 = off & externally set
 		#     -> -3 = override - off
 		$on =  3 if ($override and ($on == 1));
 		$on = -3 if ($override and ($on == 0));
@@ -429,40 +429,38 @@ sub run_schedule_check() {
 			minmax(\$bri,1,255);
 			minmax(\$sat,1,255);
 			minmax(\$hue,1,65535);
-
-			# possible states and the expected result, in order of precedence
-			# - override (on restart/reset of hued) -> always change
-			# - when externally adjusted            -> no change
-			# - controlled                          -> change
-			# for logging purposes the adjust value is also used to reflect what kind of action was taken, 
+			$on =  2 if (($on == 1) and (abs($cur_bri - $bri) > 10));
 
 			# reset or override needed? - separated these choices
-			$action = "controlled (on)";
+			$action = "(on)";
 			if ($on == 2) {
-				$action = "take_control (on)";
+				$action = "(on) externally adjusted";
 			}	
 			if ($on == 3) {
-				$action = "overridden (on)";
+				$action = "(on) overridden";
 			}	
 			if (($cur_onf == 0) and ($on == 1)) {
 				$action = "leave_off";
-			} else {
+			} elsif ($on == 1 or $on ==3) {
 				light_adjust($light,'true',$bri,$sat,$hue);
 			}	
 		} elsif ($ok and ($on < 1)) {
 			# reset or override needed? - separated these choices
-			$action = "controlled (off)";
+			$on = -2 if (($on == 0) and (abs($cur_bri - $bri) > 10));
+
+			$action = "(off)";
 			if ($on == -2) {
-				$action = "take_control (off)";
+				$action = "(off) externally adjusted";
 			}	
 			if ($on == -3) {
-				$action = "overridden (off)";
+				$action = "(off) overridden";
 			}	
 			if (($cur_onf == 1) and ($on == 0)) {
 				$action = "leave_on";
-			} else {
+			} elsif ($on == 0 or $on == -3) {
 				light_adjust($light,'false',0,150,12000);
 			}	
+
 		} else {
 			$action = "call_not_ok";
 		}	
@@ -978,7 +976,11 @@ while ($i_should_run) {
 		}	
 		$last_minute = $now_minute;
 		# reset override
-		$override = 0;
+		if ($override > 1) {
+			$override = 1;
+		} else {	
+			$override = 0;
+		}	
 	}	
 
 
