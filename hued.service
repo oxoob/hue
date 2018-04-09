@@ -1,0 +1,19 @@
+[Unit]
+Description=HUE Daemon
+After network.target = auditd.service
+
+[Service]
+ExecStart=/usr/local/bin/hued 
+ExecStop=/bin/kill -TERM $MAINPID
+ExecReload=/bin/kill -HUP $MAINPID
+Restart=on-failure
+RestartPreventExitStatus=255
+Type=forking
+PIDFile=/var/log/hue/hued.state 
+StandardOutput=syslog
+StandardError=syslog
+
+[Install]
+Alias=hued.service
+WantedBy=multi-user.target
+

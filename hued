@@ -1,11 +1,9 @@
 #!/usr/bin/perl -w 
 
-# hued, 2014-2016
+# hued, 2014-2018
 # a daemon to control a bunch of philips hue lights throughout the day
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
-
-# TODO: make randomization of start/end times possible 
 
 # use clauses
 use strict;
@@ -25,13 +23,14 @@ my %config;
 my %lights;
 my %suncycle;
 my $hue;
+my $rand_time_frame = 60; # randomization timeframe in minutes
 my $clouds = 10; # global var for storing cloudiness (so it does not have to be checked all the time)
 my $verbose = 3; # define verbose levels (as passed to printt) 
                  # also: configurable via config..
                  # 0 = off
                  # 1 = basic
-					  # 2 = more elaborate
-					  # 3 = all
+                 # 2 = more elaborate
+                 # 3 = all
 
 # daemon control variables
 my $i_should_run;
@@ -50,6 +49,9 @@ my $curl = "/usr/bin/curl";
 # some needed defaults:
 $config{'config'}{'logging'}{'hue_log'}    = "/var/log/hue/hued.log";
 $config{'config'}{'logging'}{'hue_state'}  = "/var/log/hue/hued.state";
+$config{'config'}{'hue'}{'daemon'}         = "ehh";
+$config{'config'}{'location'}{'long'}      = 5;
+$config{'config'}{'location'}{'lat'}       = 52;
 
 # read the config file  
 sub open_hue_file($) {
@@ -58,7 +60,7 @@ sub open_hue_file($) {
 	my $line;
 	my $key_A;
 	my $key_B;
-	printt (3,"phase:init - msg:Opening hue file \"$f_hue\", and loading data...\n");
+	printt (3,"phase=init msg=\"Opening hue file $f_hue, and loading data...\"\n");
 	if (open($fh_hue, "<$f_hue")) {
 		while ($line = readline($fh_hue)) {
 			chomp($line);
@@ -72,21 +74,20 @@ sub open_hue_file($) {
 			if ($line =~ /^\s*(\S+)\s*=\s*(.*)\s*$/) {
 				my $val = $2;
 				if ($val eq 'sunrise') {
-					$val = sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
+                    my $sr = mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})) + 34;
+                    $val = snim($sr);
 				}
 				if ($val eq 'sunset') {
-					# my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
-					# my $sunset  = int(mins($set));
 					$val = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
 				}
 				$config{$key_A}{$key_B}{$1} = $val;
 				$config{$key_A}{$key_B}{$1} =~ s/\s+$//g; # strip whitespace at the end
-				# print ("Added to config : $key_A - $key_B -> $1 => $2\n");
+				# print ("Added to config : $key_A $key_B -> $1 => $2\n");
 			}
 		}
 		close $fh_hue;
 	} else {
-		printt (3,"phase:init - msg:No config file found, running empty\n");
+		printt (3,"phase=init msg=\"No config file found, running empty\"\n");
 	}	
 }
 
@@ -142,6 +143,15 @@ sub by_start_time {
 	mins($config{'schedule'}{$a}{'start_time'}) <=> mins($config{'schedule'}{$b}{'start_time'});
 }	
 	
+sub write_pid($) {
+	my $pid = shift;
+	$pid = 0 if (!$pid);
+	my $state = $config{'config'}{'logging'}{'hue_state'};
+	if (open FH, ">$state") {
+		print FH "$pid\n";
+	} 	
+}
+
 # a very! basic function to attempt to emulate dawn and dusk's increase and decrease in light
 # expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. same as cloudiness
 sub calculate_suncycle($) {
@@ -154,8 +164,8 @@ sub calculate_suncycle($) {
 	my $sunset  = int(mins($set));
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
 	my $length  = int(150 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
-	printt (3,"phase:init - msg:calculating suncycle\n");
-	printt (3,"phase:init - sunrise:$sunrise ($rise) - sunset:$sunset ($set) - length:$length\n");
+	printt (3,"phase=init msg=\"calculating suncycle\"\n");
+	printt (3,"phase=init sunrise=\"$sunrise ($rise)\" sunset=\"$sunset ($set)\" length=$length\n");
 
 	# night
 	for (my $minute = 0; $minute < int($sunrise - $length/4); $minute++) {
@@ -195,7 +205,7 @@ sub calculate_default_schedules() {
 	my $stime;
 
 	$now_dow = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
-	printt (3,"phase:init - msg:calculating schedules\n");
+	printt (2,"phase=init msg=\"calculating schedules\"\n");
 	# initialize a day worth of data for each light in defaults
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		for (my $stamp = -1; $stamp <= 1440; $stamp++) {
@@ -212,13 +222,20 @@ sub calculate_default_schedules() {
 		my @days       = split(/\s+/,$config{'schedule'}{$schedule}{'days'});
 		my @on_lights  = split(/\s+/,$config{'schedule'}{$schedule}{'lights'});
 		my $ss = mins($config{'schedule'}{$schedule}{'start_time'});
-		my $se = mins($config{'schedule'}{$schedule}{'end_time'});
-		printt (3,"phase:init - sched:$schedule - start:$ss ($config{'schedule'}{$schedule}{'start_time'}) - end:$se ($config{'schedule'}{$schedule}{'end_time'})\n");
-		printt (3,"phase:init - sched:$schedule - days:'" . join(",", @days) . "'\n");
+        my $se = 0;
+        # check if end time randomization is needed:
+        if ($config{'schedule'}{$schedule}{'end_time'} =~ /\+rnd/) {
+            my ($tt) = $config{'schedule'}{$schedule}{'end_time'} =~ /(\d+:\d+)/;
+            $se = mins($tt) + int(rand($rand_time_frame));
+        } else {
+		    $se = mins($config{'schedule'}{$schedule}{'end_time'});
+        }    
+		printt (2,"phase=init sched=$schedule start=\"$ss ($config{'schedule'}{$schedule}{'start_time'})\" end=\"$se ($config{'schedule'}{$schedule}{'end_time'})\"\n");
+		printt (2,"phase=init sched=$schedule days=\"" . join(",", @days) . "\"\n");
 		
 		# verify if today is found in the days configured for this schedule
 		if (in($now_dow,\@days)) {
-			printt (3,"phase:init - sched:$schedule - day:$now_dow\n");
+			printt (3,"phase=init sched=$schedule day=$now_dow\n");
 			my $bri_adjust = 0;
 			my $sat_adjust = 0;
 			my $hue_adjust = 0;
@@ -329,11 +346,11 @@ sub smooth_default_schedules() {
 	#     ->  1 = on
 	#     -> -1 = reset
 
-	printt (3,"phase:init - msg:smoothing schedules:\n");
+	printt (3,"phase=init msg=\"smoothing schedules\"\n");
 	foreach my $light (sort keys (%{$config{'lights_defaults'}})) {
 		# process a whole day
-		printt (3,"phase:init - msg:smoothing - light:$light\n");
-		foreach my $stamp (0..1440) {
+		printt (3,"phase=init msg=smoothing light=$light\n");
+		foreach my $stamp (-1..1441) {
 			# get a weighted (using a cosine curve) average for the current $stamp
 			my $bri_value    = 0;
 			my $bri_result   = 0;
@@ -378,8 +395,8 @@ sub smooth_default_schedules() {
 			} elsif (($on == 0) and (($force_time == $stamp) or ($pre_on == 1))) {	
 				$lights{'schedules'}{$light}{$stamp}{'on'} = -3;
 			}	
-			my $msg  = "phase:init - light:$name ($light) - stamp:$stamp - action:smoothing_final ";
-			$msg .= "- onoff:$on - bri:$bri - sat:$sat - hue:$hue \n";
+			my $msg  = "phase=init light_name=$name light=$light stamp=$stamp action=smoothing_final ";
+			$msg .= "onoff=$on bri=$bri sat=$sat hue=$hue \n";
 			printt (3,$msg);
 		}	
 	}	
@@ -408,9 +425,9 @@ sub run_schedule_check() {
 		# $on ->  0 = off
 		#     ->  1 = on & under control
 		#     ->  2 = on & externally set
-		#     ->  3 = override - on
+		#     ->  3 = override on
 		#     -> -2 = off & externally set
-		#     -> -3 = override - off
+		#     -> -3 = override off
 		$on =  3 if ($override and ($on == 1));
 		$on = -3 if ($override and ($on == 0));
 		if ($ok and ($on > 0)) {
@@ -431,7 +448,7 @@ sub run_schedule_check() {
 			minmax(\$hue,1,65535);
 			$on =  2 if (($on == 1) and (abs($cur_bri - $bri) > 10));
 
-			# reset or override needed? - separated these choices
+			# reset or override needed? separated these choices
 			$action = "(on)";
 			if ($on == 2) {
 				$action = "(on) externally adjusted";
@@ -445,7 +462,7 @@ sub run_schedule_check() {
 				light_adjust($light,'true',$bri,$sat,$hue);
 			}	
 		} elsif ($ok and ($on < 1)) {
-			# reset or override needed? - separated these choices
+			# reset or override needed? separated these choices
 			$on = -2 if (($on == 0) and (abs($cur_bri - $bri) > 10));
 
 			$action = "(off)";
@@ -464,14 +481,14 @@ sub run_schedule_check() {
 		} else {
 			$action = "call_not_ok";
 		}	
-		my $msg  = "phase:running - light:$name ($light) - action:$action ";
-		$msg .= "- onoff:$on - cur_onoff:$cur_onf ";
-	   $msg .= "- bri:$bri - cur_bri:$cur_bri ";
-	   $msg .= "- sat:$sat - cur_sat:$cur_sat ";
-		$msg .= "- hue:$hue - cur_hue:$cur_hue ";
-	   $msg .= "- suncycle:$sun_val - clouds:$clouds\n";
+		my $msg  = "phase=running light_name=$name light=$light action=\"$action\" ";
+		$msg .= "onoff=$on cur_onoff=$cur_onf ";
+	    $msg .= "bri=$bri cur_bri=$cur_bri ";
+	    $msg .= "sat=$sat cur_sat=$cur_sat ";
+		$msg .= "hue=$hue cur_hue=$cur_hue\n";
 		printt (2,$msg);
 	}
+	printt(2, "phase=running type=env suncycle=$sun_val clouds=$clouds\n");
 }
 
 # RC 1 = ok + current values
@@ -482,7 +499,7 @@ sub light_current($) {
 	my $brightness = -1;
 	my $saturation = -1;
 	my $hue        = -1;
-	my $onoff;
+	my $onoff      = "true";
 	my ($curl_rc, $curl_output) = curl_hue("/lights/$light","GET",'');
 	($brightness) = ($curl_output =~ m/"bri":\s*(\d+)\s*/);
 	($saturation) = ($curl_output =~ m/"sat":\s*(\d+)\s*/);
@@ -522,11 +539,10 @@ sub light_adjust($$$$$) {
 	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
 	# to get a match on success. TODO
 	if ($curl_rc == 0 and $curl_output =~ /success/) {
-		printt (3," - curl RC : $curl_rc\n");
-		printt (3," - curl out: $curl_output\n");
+		printt (3," curl_RC=$curl_rc\n");
+		printt (3," curl_out=\"$curl_output\"\n");
 		return 1;
 	} else {	
-		# printt (3,"  a- light $light not adjusted\n");
 		return 0;
 	}	
 }	
@@ -544,14 +560,11 @@ sub light_ping($$$$) {
 	# the match on success is a bit flaky still, because 4 properties are set, but only 1 has to succeed
 	# to get a match on success. TODO
 	if ($curl_rc == 0 and $curl_output =~ /success/) {
-		# printt (3," - curl RC : $curl_rc\n");
-		# printt (3," - curl out: $curl_output\n");
 		return 1;
 	} else {	
-		# printt (3,"  a- light $light not adjusted\n");
 		return 0;
 	}	
-	printt(2,"phase:running - action:ping - light:$light - bri:$brightness - sat:$saturation - hue:$hue\n");
+	printt(2,"phase=running action=ping light=$light bri=$brightness sat=$saturation hue=$hue\n");
 }	
 
 sub light_signal($$) {
@@ -597,7 +610,6 @@ sub curl_hue($$;$) {
 	# a PUT of POST needs data with a -d option
 	$curl_data    = "-d '" . $curl_data ."'" if ($curl_data); 
 	$curl_command = "$curl -s -f -X $curl_meth -H 'Content-Type: application/json' $curl_data $curl_path";
-	# printt (3,"curl    : $curl_command\n");
 	
 	if ($child_pid = open (CO,"-|","$curl_command")) {
 		alarm($timeout);
@@ -652,14 +664,14 @@ sub get_cloudiness() {
 
 	if ($curl_rc == 0) {
 		# ok
-		($clouds) = ($curl_output =~ m/"clouds":{"all":(\d+)}/g);
+		($clouds) = ($curl_output =~ m/"clouds":\{"all":(\d+)\}/g);
 		if ($clouds != -1) {
 			$return_value = $clouds;
 		}	
-		printt (3,"action:cloudiness - rc:$return_value\n");			
+		printt (3,"action=cloudiness rc=$return_value\n");			
 	} else {
 		# curl not ok
-		printt (3,"action:cloudiness - rc:$return_value - msg:curl to $open_weather_map_url failed\n");
+		printt (3,"action=cloudiness rc=$return_value msg=\"curl to $open_weather_map_url failed\"\n");
 	}	
 	return $return_value;
 }
@@ -682,7 +694,7 @@ sub check_running_hued() {
 	} else {
 		return 42;
 	}	
-	printt (3,"phase:init - msg:check_running_hued => $ps_output\n") if ($rc > 0);
+	printt (2,"phase=init msg=\"check_running_hued => $ps_output\"\n") if ($rc > 0);
 	return $rc;
 }	
 
@@ -694,7 +706,7 @@ sub self_clean_log() {
 	my $log_size   = $config{'config'}{'logging'}{'hue_log_size'};
 	my $clean_time = $config{'config'}{'logging'}{'hue_clean_time'};
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
-	my $ts = sprintf ("%04d-%02d-%02d %02d:%02d:%02d - ", $now_year+1900,$now_month+1,$now_day,$now_hour,$now_minute,$now_second);
+	my $ts = sprintf ("%04d-%02d-%02d %02d:%02d:%02d ", $now_year+1900,$now_month+1,$now_day,$now_hour,$now_minute,$now_second);
 	my @state = stat($log_file);
 	my $run_cleanup = 0;
 
@@ -723,10 +735,10 @@ sub self_clean_log() {
 				print LF "$ts pid:$$\n";
 				close LF;
 			} else {
-				printt (3,"phase:cleanlog - msg:WARNING Log file copy not ok\n");
+				printt (3,"phase=cleanlog msg=\"WARNING Log file copy not ok\"\n");
 			}	
 		} else {
-			printt (3,"phase:cleanlog - msg:WARNING Self Cleaning FAILED\n");
+			printt (3,"phase=cleanlog msg=\"WARNING Self Cleaning FAILED\"\n");
 		}	
 	}
 }
@@ -760,7 +772,6 @@ sub pushover($$$) {
 	my $curl_command; 
 	
 	$curl_command = "$curl -s -f -X POST -d 'title=$title' -d 'message=$message' -d 'priority=$prio' -d 'sound=gamelan' -d 'token=$token' -d 'user=$user' $url";
-	# printt (3,"curl    : $curl_command\n");
 	
 	# TODO: verify output, as requested in the pushover API documentation
 	if ($child_pid = open (CO,"-|","$curl_command")) {
@@ -772,32 +783,32 @@ sub pushover($$$) {
 		$curl_RC = $?;
 		alarm(0);
 	}
-	printt (3,"action:push - rc:$curl_RC\n");
-	printt (3,"action:push - out:$curl_output\n");
+	printt (3,"action=push rc=$curl_RC\n");
+	printt (3,"action=push out=\"$curl_output\"\n");
 	return ($curl_RC, $curl_output);
 }	
 
 # SIGNAL handlers
 sub signal_term {
-	printt (1,"msg:### Caught TERM / INT \n");
+	printt (1,"msg=\"### Caught TERM / INT\"\n");
 	$i_should_run = 0;
 	# mail_info("Hued ended","PID: $$")
 }
 
 sub signal_hup {
-	printt (1,"msg:### Caught HUP - reloading config \n");
+	printt (1,"msg=\"### Caught HUP reloading config\"\n");
 	$i_should_reload_config = 1;
 	$i_caught_a_signal = 1;
 }
 
 sub signal_usr1 {
-	printt (1,"msg:### Caught USR1 - enforcing light settings\n");
+	printt (1,"msg=\"### Caught USR1 enforcing light settings\"\n");
 	$i_caught_a_signal = 1;
 	$override = 1;
 } 
 
 sub signal_usr2 {
-	printt (1,"msg:### Caught USR2 - dump hashes\n");
+	printt (1,"msg=\"### Caught USR2 dump hashes\"\n");
 	$i_caught_a_signal = 1;
 	$dump_hashes = 1;
 } 
@@ -806,9 +817,9 @@ sub kill_child() {
 	my $count = 0;
 	$count = kill ("TERM", $child_pid);
 	if ($count > 0) {
-		printt (1,"msg:command with PID $child_pid, killed due to timeout\n");
+		printt (1,"msg=\"command with PID $child_pid, killed due to timeout\"\n");
 	} else {	
-		printt (1,"msg:command with PID $child_pid, failed to be killed\n");
+		printt (1,"msg=\"command with PID $child_pid, failed to be killed\"\n");
 	}	
 }
 
@@ -818,10 +829,10 @@ sub load_config() {
 	%lights = ();
 
 	# some needed defaults:
-	$config{'config'}{'logging'}{'hue_log'}   = "/var/log/hue/hued.log";
-	$config{'config'}{'logging'}{'hue_state'} = "/var/log/hue/hued.state";
-  
-  	# open the config file (in same dir as daemon - for now)
+	$config{'config'}{'logging'}{'hue_log'}    = "/var/log/hue/hued.log";
+	$config{'config'}{'logging'}{'hue_state'}  = "/var/log/hue/hued.state";
+
+  	# open the config file (in same dir as daemon for now)
 	open_hue_file("/usr/local/etc/hue.conf");
 }	
 	
@@ -846,7 +857,7 @@ sub printt($$) {
 	my $message       = shift;
 	if ($verbose_level <= $verbose) {
 		my ($year,$month,$day,$hour,$minute,$second) = (localtime)[5,4,3,2,1,0];
-		printf ("%04d-%02d-%02d %02d:%02d:%02d - verbosity:%1d - ",$year+1900,$month+1,$day,$hour,$minute,$second,$verbose_level);
+		printf ("%04d-%02d-%02d %02d:%02d:%02d verbosity=%1d ",$year+1900,$month+1,$day,$hour,$minute,$second,$verbose_level);
 		print $message;
 	}	
 }
@@ -861,7 +872,7 @@ sub check_triggers() {
 				utime (0,0,$file);
 				my ($year,$month,$day,$hour,$minute) = (localtime)[5,4,3,2,1];
 				my $stmp = sprintf ("%04d-%02d-%02d %02d:%02d",$year+1900,$month+1,$day,$hour,$minute);
-				printt(2,"phase:force - msg:touch_triggered FORCE via $file $mtime\n");
+				printt(2,"phase=force msg=\"touch_triggered FORCE via $file $mtime\"\n");
 				pushover("Hued was forced via external call.", "Stamp: $stmp", "1");
 			}	
 		}	
@@ -874,8 +885,8 @@ sub check_triggers() {
 				utime (0,0,$file);
 				my ($year,$month,$day,$hour,$minute) = (localtime)[5,4,3,2,1];
 				my $stmp = sprintf ("%04d-%02d-%02d %02d:%02d",$year+1900,$month+1,$day,$hour,$minute);
-				printt(2,"phase:signal - msg:touch_triggered SIGNAL via $file $mtime\n");
-				light_signal("TV",$config{'config'}{'ping_trigger'}{'signal'});
+				printt(2,"phase=signal msg=\"touch_triggered SIGNAL via $file $mtime\"\n");
+				light_signal("Dressoir",$config{'config'}{'ping_trigger'}{'signal'});
 				pushover("Hued was signalled via external call.", "Stamp: $stmp", "1");
 			}	
 		}
@@ -895,7 +906,7 @@ load_config();
 # set verbosity via config, if specified
 $verbose = $config{'config'}{'logging'}{'verbosity'} if ($config{'config'}{'logging'}{'verbosity'});
 
-printt (3,"phase:init - msg:pre-fork - pid:$$\n");
+printt (3,"phase=init msg=pre-fork pid=$$\n");
 
 # daemonize?
 if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
@@ -908,19 +919,19 @@ if ($config{'config'}{'hue'}{'daemon'} eq 'yes') {
 	die "Couldn't fork $!\n" unless defined($pid);
 	# diassociate from controlling terminal..
 	POSIX:setsid() or die "Can't start a new session $!\n";
-	printt (1,"phase:init - msg:hued started - mode:DAEMON MODE - pid:$$\n");
+	printt (1,"phase=init msg=\"hued started\" mode=\"DAEMON MODE\" pid=$$\n");
 	if (check_running_hued()) {
-		printt (1,"phase:init - msg:hued terminated - reason:another daemon found\n");
+		printt (1,"phase=init msg=\"hued terminated\" reason=\"another daemon found\"\n");
 		exit 1;
 	}
 	set_STDERR($config{'config'}{'logging'}{'hue_log'});
 	set_STDOUT($config{'config'}{'logging'}{'hue_log'});
 } else {	
-	printt (1,"phase:init - msg:hued started - mode:CONSOLE MODE - pid:$$\n");
+	printt (1,"phase=init msg=\"hued started\" mode=\"CONSOLE MODE\" pid=$$\n");
 }	
 # end of daemonisation
 
-printt (1,"phase:init - verbosity_level: $verbose\n");
+printt (1,"phase=init verbosity_level=$verbose\n");
 
 # catch signals
 $SIG{INT} = $SIG{TERM} = \&signal_term;
@@ -941,8 +952,9 @@ $i_caught_a_signal=0;
 
 # if we get here, starting probably worked ;)
 # write the PID and some stuff to state file
-printt (3,"phase:init - msg:waiting for first trigger (10 seconds)\n");
-printt (1,"phase:init - msg:starting regular operation\n");
+printt (3,"phase=init msg=\"waiting for first trigger (10 seconds)\"\n");
+printt (1,"phase=init msg=\"starting regular operation\" PID=$$\n");
+write_pid($$);
 pushover("Hued has been started!", "PID: $$","1");
 
 while ($i_should_run) {
@@ -967,8 +979,8 @@ while ($i_should_run) {
 		}	
 		run_schedule_check();
 
-		# at 0:00 in the morning, do selfcleaning, and calculate the suncycle and schedules for the day
-		if (($now_hour == 0) and ($now_minute == 0)) {
+		# at 22:00 do selfcleaning, and calculate the suncycle and schedules for the day
+		if (($now_hour == 22) and ($now_minute == 0)) {
 			self_clean_log();
 			calculate_suncycle(\%suncycle);
 			calculate_default_schedules();
@@ -1008,7 +1020,7 @@ while ($i_should_run) {
 }
 
 pushover("Hued has ended", "PID: $$","1");
-printt (1,"phase:shutdown - msg:hued ended succesfully, PID: $$\n");
+printt (1,"phase=shutdown msg=\"hued ended succesfully\" PID=$$\n");
 exit 0;
 
 # bye now
