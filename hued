@@ -24,8 +24,8 @@ my %lights;
 my %suncycle;
 my $hue;
 my $rand_time_frame = 60; # randomization timeframe in minutes
-my $clouds = 10; # global var for storing cloudiness (so it does not have to be checked all the time)
-my $verbose = 3; # define verbose levels (as passed to printt) 
+my $outside_light = 10; # global var for storing outside lightlevel (so it does not have to be checked all the time)
+my $verbose = 1; # define verbose levels (as passed to printt) 
                  # also: configurable via config..
                  # 0 = off
                  # 1 = basic
@@ -62,6 +62,7 @@ sub open_hue_file($) {
 	my $key_B;
 	printt (3,"phase=init msg=\"Opening hue file $f_hue, and loading data...\"\n");
 	if (open($fh_hue, "<$f_hue")) {
+        $config{'config'}{'file'} = $f_hue;
 		while ($line = readline($fh_hue)) {
 			chomp($line);
 			$line =~ s/\s*#.*//; # remove comments
@@ -74,11 +75,12 @@ sub open_hue_file($) {
 			if ($line =~ /^\s*(\S+)\s*=\s*(.*)\s*$/) {
 				my $val = $2;
 				if ($val eq 'sunrise') {
-                    my $sr = mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})) + 34;
+                    my $sr = mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
                     $val = snim($sr);
 				}
 				if ($val eq 'sunset') {
-					$val = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
+					my $ss = mins(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'}));
+                    $val = snim($ss);
 				}
 				$config{$key_A}{$key_B}{$1} = $val;
 				$config{$key_A}{$key_B}{$1} =~ s/\s+$//g; # strip whitespace at the end
@@ -105,6 +107,7 @@ sub in($$) {
 # convert HH:MM to minutes; :SS is ignored, which means it's rounded to the minute
 sub mins($) {
 	my $hhmm = shift;
+    $hhmm =~ s/\+rnd//g;
 	my ($hh,$mm,$ss) = split (":", $hhmm);
 	return ($hh * 60) + $mm;
 }	
@@ -122,6 +125,7 @@ sub minmax($$$) {
 	my $val_ref = shift;
 	my $min = shift;
 	my $max = shift;
+    $$val_ref = 10 if (!defined($$val_ref));
 	$$val_ref = $min if ($$val_ref < $min);
 	$$val_ref = $max if ($$val_ref > $max);
 }	
@@ -153,15 +157,15 @@ sub write_pid($) {
 }
 
 # a very! basic function to attempt to emulate dawn and dusk's increase and decrease in light
-# expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. same as cloudiness
+# expressed in a value from 0 to 100 (a percentage), 0 is light, 100 is dark. 
 sub calculate_suncycle($) {
 	my $suncycle_ref = shift;
 	my $time;
 	my $stime;
-	my $rise    = sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
-	my $sunrise = int(mins($rise));
-	my $set     = sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'});
-	my $sunset  = int(mins($set));
+    my $sunrise = int(mins(sun_rise($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})));
+	my $rise    = snim($sunrise);
+    my $sunset  = int(mins(sun_set($config{'config'}{'location'}{'long'},$config{'config'}{'location'}{'lat'})));
+	my $set     = snim($sunset);
 	# just a ballpark attempt at guessing the length of dusk or dawn in minutes (related to latitude)
 	my $length  = int(150 * sin(3.1415 * $config{'config'}{'location'}{'lat'} / 180));
 	printt (3,"phase=init msg=\"calculating suncycle\"\n");
@@ -389,7 +393,7 @@ sub smooth_default_schedules() {
 			my $sat    = $lights{'schedules'}{$light}{$stamp}{'sat_smooth'};
 			my $hue    = $lights{'schedules'}{$light}{$stamp}{'hue_smooth'};
 			my $on     = $lights{'schedules'}{$light}{$stamp}{'on'};
-		   my $pre_on = $lights{'schedules'}{$light}{$stamp-1}{'on'};
+            my $pre_on = $lights{'schedules'}{$light}{$stamp-1}{'on'};
 			if (($on == 1) and (($force_time == $stamp) or ($pre_on == 0))) {
 				$lights{'schedules'}{$light}{$stamp}{'on'} = 3;
 			} elsif (($on == 0) and (($force_time == $stamp) or ($pre_on == 1))) {	
@@ -407,6 +411,12 @@ sub run_schedule_check() {
 	# get the needed parameters into single variables
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
 	my $stamp    = mins("$now_hour:$now_minute"); 
+	my $msg      = "phase=running action=run_schedule_check stamp=$stamp ";
+    $stamp       += $config{'config'}{'location'}{'tz_correction'} * 60;
+    $stamp       -= 1440 if ($stamp > 1440);
+    $msg         .= "newstamp=$stamp \n";
+	printt (3,$msg);
+
 	$now_dow     = 7 if ($now_dow == 0); # sunday is the LAST day of the week.
 	my $sun_val  = get_suncycle($stamp);
 
@@ -437,7 +447,7 @@ sub run_schedule_check() {
 				# also adjust for the sun, as the sun_adjust gets higher, the effect of the weather adjustment should get lower
 				my $sun_val = get_suncycle($stamp);
 				# 2 percentages, hence the division by 10000
-				$bri_adjust += int($config{'config'}{'adjust'}{'clouds'} * ((100 - $sun_val) * $clouds / 10000)); 
+				$bri_adjust += int($config{'config'}{'adjust'}{'outside_light'} * ((100 - $sun_val) * $outside_light / 10000)); 
 			}	
 
 			# finalize brightness/saturation/hue
@@ -481,14 +491,14 @@ sub run_schedule_check() {
 		} else {
 			$action = "call_not_ok";
 		}	
-		my $msg  = "phase=running light_name=$name light=$light action=\"$action\" ";
+		my $msg  = "phase=running light_name=$name light=$light action=\"$action\" stamp=$stamp ";
 		$msg .= "onoff=$on cur_onoff=$cur_onf ";
 	    $msg .= "bri=$bri cur_bri=$cur_bri ";
 	    $msg .= "sat=$sat cur_sat=$cur_sat ";
 		$msg .= "hue=$hue cur_hue=$cur_hue\n";
 		printt (2,$msg);
 	}
-	printt(2, "phase=running type=env suncycle=$sun_val clouds=$clouds\n");
+	printt(2, "phase=running type=env suncycle=$sun_val outside_light=$outside_light\n");
 }
 
 # RC 1 = ok + current values
@@ -518,6 +528,55 @@ sub light_current($) {
 		return (1, $onoff, $brightness, $saturation, $hue);
 	} else {
 		return (0,0,0,0,0);
+	}	
+}	
+	
+# RC 1 = ok + current values
+# RC 0 = not, data probably incomplete
+sub sensor_current() {
+    # temp
+	my ($curl2_rc, $curl2_output) = curl_hue("/sensors/2/","GET",'');
+	my ($temperature) = ($curl2_output =~ m/"temperature":\s*(\w+)\s*/);
+	my ($temperature_updated) = ($curl2_output =~ m/"lastupdated":\s*"([\d\-:T]+)"\s*/);
+    # presence
+	my ($curl3_rc, $curl3_output) = curl_hue("/sensors/3/","GET",'');
+	my ($presence) = ($curl3_output =~ m/"presence":\s*(\w+)\s*/);
+	my ($presence_updated) = ($curl3_output =~ m/"lastupdated":\s*"([\d\-:T]+)"\s*/);
+    # light 
+	my ($curl4_rc, $curl4_output) = curl_hue("/sensors/4/","GET",'');
+	my ($daylight) = ($curl4_output =~ m/"daylight":\s*(\w+)\s*/);
+	my ($dark) = ($curl4_output =~ m/"dark":\s*(\w+)\s*/);
+	my ($lightlevel) = ($curl4_output =~ m/"lightlevel":\s*(\d+)\s*/);
+	my ($battery) = ($curl4_output =~ m/"battery":\s*(\w+)\s*/);
+	my ($daylight_updated) = ($curl4_output =~ m/"lastupdated":\s*"([\d\-\:T]+)"\s*/);
+
+    if ($dark eq 'true') { 
+        $dark = 1; 
+    } else { 
+        $dark = 0; 
+    }    
+    if ($daylight eq 'true') { 
+        $daylight = 1; 
+    } else { 
+        $daylight = 0; 
+    }    
+    if ($presence eq 'true') { 
+        $presence = 1; 
+    } else { 
+        $presence = 0; 
+    }    
+    $battery = 3 if ($battery eq 'null'); 
+
+    my $msg = "phase=running action=read_sensor ";
+    $msg .= "daylight=$daylight dark=$dark lightlevel=$lightlevel battery=$battery temperature=$temperature presence=$presence ";
+    $msg .= "daylight_updated=$daylight_updated temperature_updated=$temperature_updated presence_updated=$presence_updated\n";
+    printt (2, $msg);
+	# everything has to be in order:
+	# if (($curl_rc == 0) and ($brightness > -1) and ($saturation > -1) and ($hue > -1)) {
+	if (($curl4_rc == 0) and ($curl3_rc == 0) and ($curl2_rc == 0) and ($battery > 0)) {
+		return (1, $daylight, $dark, $lightlevel, $battery, $temperature, $presence, $daylight_updated, $temperature_updated, $presence_updated);
+	} else {
+		return (0, 0, 0, 0, 0, 0, "", "", "");
 	}	
 }	
 	
@@ -587,8 +646,8 @@ sub light_signal($$) {
 	} elsif ($signal eq "red") {
 		light_ping($light,250,250,65000);
 		select (undef,undef,undef,1.0);
-	} elsif ($signal eq "orange") {
-		light_ping($light,250,250,8000);
+	} elsif ($signal eq "green") {
+		light_ping($light,250,250,24000);
 		select (undef,undef,undef,1.0);
 	}		
 
@@ -631,51 +690,21 @@ sub get_suncycle($) {
 	return $result;
 }
 
-# dummy for testing
-sub get_cloudiness_dummy() {
-	my $clouds = 25;
-	return $clouds;
+# take lightlevel and return a 100-0 % value for lightness
+# 100 = dark, 0 = light (this is because the perspective is the amount of compensation needed)
+sub calculate_light($) {
+    my $lightlevel = shift;
+    my $outside_light = 0;
+    # minimum seems to be 6000, for inside luminesence
+    # at 20000 there seems to be enough light coming into the house
+    $lightlevel -= 6000;
+    $lightlevel = 0 if ($lightlevel < 0);
+    $outside_light = int($lightlevel / 140);
+    $outside_light = 100 if ($outside_light>100);
+    $outside_light = 100 - $outside_light;
+	return $outside_light;
 }	
 	
-
-# does something with weather, returns clouds value (0-100) 
-sub get_cloudiness() {
-	my $return_value = 10; # arbitrary default to 10
-	my $longitude = $config{'config'}{'location'}{'long'};
-	my $latitude  = $config{'config'}{'location'}{'lat'};
-	my $open_weather_map_url = "http://api.openweathermap.org/data/2.5/weather?mode=json&units=metric&lat=$latitude&lon=$longitude&APPID=dd792850767795f60de66a5f7dd264d4";
-	my $curl_command = "$curl -s -f -X GET -H 'Content-Type: application/json' '$open_weather_map_url'";
-	my $curl_output;
-	my $curl_rc;
-	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
-	my $time = sprintf("%02d:%02d:00", $now_hour, $now_minute);
-	my $clouds = -1; # 100 = heavy overcast, 0 = clear sky, -1 = no value
-	
-	# setup a curl session to openweathermap
-	if ($child_pid = open (CO,"-|","$curl_command")) {
-		alarm($timeout);
-		while (<CO>) {
-			$curl_output .= $_;	
-		}
-		close(CO);
-		$curl_rc = $?;
-		alarm(0);
-	}
-
-	if ($curl_rc == 0) {
-		# ok
-		($clouds) = ($curl_output =~ m/"clouds":\{"all":(\d+)\}/g);
-		if ($clouds != -1) {
-			$return_value = $clouds;
-		}	
-		printt (3,"action=cloudiness rc=$return_value\n");			
-	} else {
-		# curl not ok
-		printt (3,"action=cloudiness rc=$return_value msg=\"curl to $open_weather_map_url failed\"\n");
-	}	
-	return $return_value;
-}
-
 # RC1 = found another daemon, RC0 = no other daemon found
 sub check_running_hued() {
 	my $ps = "/bin/ps -C hued -o pid,start,cmd --no-heading";
@@ -863,6 +892,21 @@ sub printt($$) {
 }
 
 sub check_triggers() {
+	if (exists($config{'config'}{'file'})) {
+		my $file = $config{'config'}{'file'};
+		if (-e $file) {
+			my $mtime = (stat($file))[9];
+			if ($mtime > (time() - 60)) {
+				$i_should_reload_config = 1;
+				utime (0,0,$file);
+				my ($year,$month,$day,$hour,$minute) = (localtime)[5,4,3,2,1];
+				my $stmp = sprintf ("%04d-%02d-%02d %02d:%02d",$year+1900,$month+1,$day,$hour,$minute);
+				printt(2,"phase=update msg=\"touch_triggered config reload via $file $mtime\"\n");
+				light_signal("TVlamp",$config{'config'}{'ping_trigger'}{'reset'});
+				pushover("Hued config was reloaded via config update.", "Stamp: $stmp", "1");
+			}	
+		}	
+	}	
 	if (exists($config{'config'}{'touch_triggers'}{'force'})) {
 		my $file = $config{'config'}{'touch_triggers'}{'force'};
 		if (-e $file) {
@@ -873,6 +917,7 @@ sub check_triggers() {
 				my ($year,$month,$day,$hour,$minute) = (localtime)[5,4,3,2,1];
 				my $stmp = sprintf ("%04d-%02d-%02d %02d:%02d",$year+1900,$month+1,$day,$hour,$minute);
 				printt(2,"phase=force msg=\"touch_triggered FORCE via $file $mtime\"\n");
+				light_signal("TVlamp",$config{'config'}{'ping_trigger'}{'signal'});
 				pushover("Hued was forced via external call.", "Stamp: $stmp", "1");
 			}	
 		}	
@@ -886,7 +931,7 @@ sub check_triggers() {
 				my ($year,$month,$day,$hour,$minute) = (localtime)[5,4,3,2,1];
 				my $stmp = sprintf ("%04d-%02d-%02d %02d:%02d",$year+1900,$month+1,$day,$hour,$minute);
 				printt(2,"phase=signal msg=\"touch_triggered SIGNAL via $file $mtime\"\n");
-				light_signal("Dressoir",$config{'config'}{'ping_trigger'}{'signal'});
+				light_signal("TVlamp",$config{'config'}{'ping_trigger'}{'signal'});
 				pushover("Hued was signalled via external call.", "Stamp: $stmp", "1");
 			}	
 		}
@@ -944,8 +989,6 @@ calculate_suncycle(\%suncycle);
 calculate_default_schedules();
 smooth_default_schedules();
 
-$clouds = get_cloudiness();
-
 $i_should_run=1;
 $i_should_reload_config=0;
 $i_caught_a_signal=0;
@@ -966,21 +1009,18 @@ while ($i_should_run) {
 
 	# what is now?
 	my ($now_dow,$now_year,$now_month,$now_day,$now_hour,$now_minute,$now_second) = (localtime)[6,5,4,3,2,1,0];
+    my ($sensor_rc, $daylight, $dark, $lightlevel, $battery, $temperature, $presence, 
+        $daylight_updated, $temperature_updated, $presence_updated) = sensor_current(); # get sensor data
+    $outside_light = calculate_light($lightlevel);
 
 	# run_schedule_check every minute, but only once a minute
 	# that means only trigger when the minute has changed
 	if ($now_minute != $last_minute) {
-		# check if settings need to be overridden
-		check_triggers();
+		check_triggers(); # check if settings need to be overridden
+		run_schedule_check(); # run the lights check
 
-		# every 15 minutes (but on the third minute), update clouds value, unless the sun is going down
-		if (($now_minute % 15 == 3) and (get_suncycle(mins("$now_hour:$now_minute")) < 80)) {
-			$clouds = get_cloudiness();
-		}	
-		run_schedule_check();
-
-		# at 22:00 do selfcleaning, and calculate the suncycle and schedules for the day
-		if (($now_hour == 22) and ($now_minute == 0)) {
+		# at 05:00 do selfcleaning, and calculate the suncycle and schedules for the day
+		if (($now_hour == 5) and ($now_minute == 0)) {
 			self_clean_log();
 			calculate_suncycle(\%suncycle);
 			calculate_default_schedules();
