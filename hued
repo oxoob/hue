@@ -1,6 +1,6 @@
 #!/usr/bin/perl -w 
 
-# hued, 2014-2018
+# hued, 2014-2019
 # a daemon to control a bunch of philips hue lights throughout the day
 # License: not decided yet, for now: no commecial use, only use it privately and include the original github location:
 # https://github.com/oxoob/hue
